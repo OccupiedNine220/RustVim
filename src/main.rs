@@ -129,13 +129,17 @@ impl Editor {
                 line.to_owned()
             };
             if self.show_numbers {
-                println!("{marker} {:>width$} | {rendered_line}", index + 1, width = number_width);
+                print!(
+                    "{marker} {:>width$} | {rendered_line}\r\n",
+                    index + 1,
+                    width = number_width
+                );
             } else {
-                println!("{marker} {rendered_line}");
+                print!("{marker} {rendered_line}\r\n");
             }
         }
-        println!("~");
-        println!("~");
+        print!("~\r\n");
+        print!("~\r\n");
 
         let mode = match self.mode {
             Mode::Normal => "NORMAL",
@@ -143,8 +147,8 @@ impl Editor {
             Mode::VisualLine => "VISUAL LINE",
             Mode::Command => "COMMAND",
         };
-        println!(
-            "\x1b[7m {}{}  {}  line {}, col {} \x1b[0m",
+        print!(
+            "\x1b[7m {}{}  {}  line {}, col {} \x1b[0m\r\n",
             self.path.display(),
             if self.dirty { " [+]" } else { "" },
             mode,
@@ -229,10 +233,12 @@ impl Editor {
                 self.visual_anchor = self.cursor_line;
                 self.message = String::from("Line selection. Use arrows, y, d, Esc.");
             }
-            Key::Char('g' | 'd' | 'y' | 'c' | 'r' | '>' | '<') => self.pending = match key {
-                Key::Char(ch) => Some(ch),
-                _ => None,
-            },
+            Key::Char('g' | 'd' | 'y' | 'c' | 'r' | '>' | '<') => {
+                self.pending = match key {
+                    Key::Char(ch) => Some(ch),
+                    _ => None,
+                }
+            }
             Key::Char('p') => self.paste_after(),
             Key::Char('P') => self.paste_before(),
             Key::Char('x') => self.delete_char(),
@@ -277,7 +283,9 @@ impl Editor {
             ('r', Key::Char(ch)) if !ch.is_control() => self.replace_char(ch),
             ('>', Key::Char('>')) => self.indent_current_line(),
             ('<', Key::Char('<')) => self.outdent_current_line(),
-            (first, Key::Char(second)) => self.message = format!("Unknown command: {first}{second}"),
+            (first, Key::Char(second)) => {
+                self.message = format!("Unknown command: {first}{second}")
+            }
             (first, _) => self.message = format!("Cancelled pending command: {first}"),
         }
         Ok(false)
@@ -429,7 +437,7 @@ impl Editor {
     }
 
     fn save(&mut self) -> io::Result<()> {
-        fs::write(&self.path, format!("{}\n", self.lines.join("\n")))?;
+        fs::write(&self.path, serialize_editor_lines(&self.lines))?;
         self.dirty = false;
         self.message = format!("Saved: {}", self.path.display());
         Ok(())
@@ -440,7 +448,7 @@ impl Editor {
             self.message = String::from("Missing file name.");
             return Ok(());
         }
-        fs::write(&path, format!("{}\n", self.lines.join("\n")))?;
+        fs::write(&path, serialize_editor_lines(&self.lines))?;
         self.path = path;
         self.dirty = false;
         self.message = format!("Saved as: {}", self.path.display());
@@ -483,7 +491,9 @@ impl Editor {
         } else {
             command
         };
-        let spec = trimmed.strip_prefix("%s/").or_else(|| trimmed.strip_prefix("s/"));
+        let spec = trimmed
+            .strip_prefix("%s/")
+            .or_else(|| trimmed.strip_prefix("s/"));
         let Some(spec) = spec else {
             self.message = String::from("Substitute syntax: :%s/old/new/g");
             return;
@@ -758,7 +768,10 @@ impl Editor {
 
     fn move_left(&mut self) {
         if self.cursor_col > 0 {
-            if let Some((index, _)) = self.lines[self.cursor_line][..self.cursor_col].char_indices().last() {
+            if let Some((index, _)) = self.lines[self.cursor_line][..self.cursor_col]
+                .char_indices()
+                .last()
+            {
                 self.cursor_col = index;
             }
         }
@@ -927,7 +940,9 @@ impl Editor {
     }
 
     fn subscription_for_hjkl(&mut self) {
-        self.message = String::from("h/j/k/l navigation is included in RustVim Pro. Use arrow keys for the free tier.");
+        self.message = String::from(
+            "h/j/k/l navigation is included in RustVim Pro. Use arrow keys for the free tier.",
+        );
     }
 
     fn subscription_for_exit(&mut self) {
@@ -1007,6 +1022,10 @@ fn split_editor_lines(content: &str) -> Vec<String> {
     lines
 }
 
+fn serialize_editor_lines(lines: &[String]) -> String {
+    format!("{}\n", lines.join("\n"))
+}
+
 fn first_non_blank(line: &str) -> usize {
     line.char_indices()
         .find(|(_, ch)| !ch.is_whitespace())
@@ -1043,6 +1062,34 @@ fn render_cursor_line(line: &str, cursor_col: usize) -> String {
         &line[cursor_col..end],
         &line[end..]
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{serialize_editor_lines, split_editor_lines};
+
+    #[test]
+    fn split_editor_lines_handles_lf_and_final_newline() {
+        assert_eq!(
+            split_editor_lines("one\n\ntwo\n"),
+            vec!["one".to_string(), String::new(), "two".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_editor_lines_normalizes_crlf_only_at_line_end() {
+        assert_eq!(
+            split_editor_lines("one\r\ntw\ro\r\n"),
+            vec!["one".to_string(), "tw\ro".to_string()]
+        );
+    }
+
+    #[test]
+    fn serialize_editor_lines_preserves_blank_lines() {
+        let lines = vec!["one".to_string(), String::new(), "two".to_string()];
+
+        assert_eq!(serialize_editor_lines(&lines), "one\n\ntwo\n");
+    }
 }
 
 fn main() -> io::Result<()> {
