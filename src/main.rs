@@ -1007,7 +1007,7 @@ fn run_stty(args: &[&str]) -> io::Result<()> {
     if status.success() {
         Ok(())
     } else {
-        Err(io::Error::new(io::ErrorKind::Other, "stty failed"))
+        Err(io::Error::other("stty failed"))
     }
 }
 
@@ -1064,6 +1064,25 @@ fn render_cursor_line(line: &str, cursor_col: usize) -> String {
     )
 }
 
+fn main() -> io::Result<()> {
+    let path = env::args_os()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("untitled.txt"));
+    let _raw = RawTerminal::enter()?;
+    let mut editor = Editor::open(path)?;
+
+    loop {
+        editor.render()?;
+        if editor.handle_key(read_key()?)? {
+            break;
+        }
+    }
+
+    println!("\x1b[2J\x1b[HBye.");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{serialize_editor_lines, split_editor_lines};
@@ -1090,23 +1109,4 @@ mod tests {
 
         assert_eq!(serialize_editor_lines(&lines), "one\n\ntwo\n");
     }
-}
-
-fn main() -> io::Result<()> {
-    let path = env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("untitled.txt"));
-    let _raw = RawTerminal::enter()?;
-    let mut editor = Editor::open(path)?;
-
-    loop {
-        editor.render()?;
-        if editor.handle_key(read_key()?)? {
-            break;
-        }
-    }
-
-    println!("\x1b[2J\x1b[HBye.");
-    Ok(())
 }
