@@ -7,6 +7,8 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+const PRO_ENV_VAR: &str = "RUSTVIM_PRO";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Normal,
@@ -79,10 +81,15 @@ struct Editor {
     search: Option<String>,
     show_numbers: bool,
     use_alternate_buffer: bool,
+    pro_active: bool,
 }
 
 impl Editor {
     fn open(path: PathBuf) -> io::Result<Self> {
+        Self::open_with_pro(path, pro_active_from_env())
+    }
+
+    fn open_with_pro(path: PathBuf, pro_active: bool) -> io::Result<Self> {
         let lines = match fs::read_to_string(&path) {
             Ok(content) => {
                 let mut lines = split_editor_lines(&content);
@@ -112,6 +119,7 @@ impl Editor {
             search: None,
             show_numbers: true,
             use_alternate_buffer: true,
+            pro_active,
         })
     }
 
@@ -254,13 +262,13 @@ impl Editor {
             Key::Char('0') => self.cursor_col = 0,
             Key::Char('$') => self.cursor_col = self.current_line_len(),
             Key::Char('G') => self.move_to_last_line(),
-            Key::Char('h' | 'j' | 'k' | 'l') => self.subscription_for_hjkl(),
+            Key::Char(ch @ ('h' | 'j' | 'k' | 'l')) => self.handle_hjkl(ch),
             Key::ArrowUp => self.move_up(),
             Key::ArrowDown => self.move_down(),
             Key::ArrowLeft => self.move_left(),
             Key::ArrowRight => self.move_right(),
             Key::Esc => self.message.clear(),
-            Key::CtrlC => self.subscription_for_exit(),
+            Key::CtrlC => return Ok(self.try_exit()),
             _ => {}
         }
         Ok(false)
@@ -318,7 +326,7 @@ impl Editor {
             }
             Key::ArrowUp => self.move_up(),
             Key::ArrowDown => self.move_down(),
-            Key::Char('h' | 'j' | 'k' | 'l') => self.subscription_for_hjkl(),
+            Key::Char(ch @ ('h' | 'j' | 'k' | 'l')) => self.handle_hjkl(ch),
             Key::Char('y') => {
                 self.yank_selection();
                 self.mode = Mode::Normal;
@@ -362,21 +370,24 @@ impl Editor {
         match command {
             "w" => self.save()?,
             "q" => {
-                self.subscription_for_exit();
+                return Ok(self.try_exit());
             }
             "wq" | "x" => {
                 self.save()?;
+                if self.pro_active {
+                    return Ok(true);
+                }
                 self.message = String::from("Saved, but exit still requires RustVim Pro.");
             }
             "q!" | "qa" | "qa!" => {
-                self.subscription_for_exit();
+                return Ok(self.try_exit());
             }
             "term" => {
                 self.open_terminal(None)?;
             }
             "help" => {
                 self.message = String::from(
-                    "i/a/I/A/o/O | arrows | hjkl Pro | V y d | dd yy cc p x r D C J u w b e n N >> << | / :s :set :e :w",
+                    "i/a/I/A/o/O | arrows | hjkl Pro | V y d | dd yy cc p x r D C J u w b e n N >> << | / :s :set :e :w :q",
                 );
             }
             "set number" | "set nu" => {
@@ -939,15 +950,43 @@ impl Editor {
         self.lines[self.cursor_line].len()
     }
 
-    fn subscription_for_hjkl(&mut self) {
-        self.message = String::from(
-            "h/j/k/l navigation is included in RustVim Pro. Use arrow keys for the free tier.",
-        );
+    fn handle_hjkl(&mut self, key: char) {
+        if !self.pro_active {
+            self.message = String::from(
+                "h/j/k/l navigation is included in RustVim Pro. Use arrow keys for the free tier.",
+            );
+            return;
+        }
+
+        match key {
+            'h' => self.move_left(),
+            'j' => self.move_down(),
+            'k' => self.move_up(),
+            'l' => self.move_right(),
+            _ => unreachable!(),
+        }
     }
 
-    fn subscription_for_exit(&mut self) {
+    fn try_exit(&mut self) -> bool {
+        if self.pro_active {
+            return true;
+        }
         self.message = String::from("Exit requires an active RustVim Pro subscription.");
+        false
     }
+}
+
+fn pro_active_from_env() -> bool {
+    env::var(PRO_ENV_VAR)
+        .map(|value| env_value_is_enabled(&value))
+        .unwrap_or(false)
+}
+
+fn env_value_is_enabled(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on" | "enabled"
+    )
 }
 
 fn read_key() -> io::Result<Key> {
@@ -1085,7 +1124,21 @@ fn main() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{serialize_editor_lines, split_editor_lines};
+    use super::{env_value_is_enabled, serialize_editor_lines, split_editor_lines};
+
+    #[test]
+    fn pro_env_accepts_common_enabled_values() {
+        for value in ["1", "true", "TRUE", "yes", "on", " enabled "] {
+            assert!(env_value_is_enabled(value), "{value} should enable Pro");
+        }
+    }
+
+    #[test]
+    fn pro_env_rejects_disabled_or_unknown_values() {
+        for value in ["", "0", "false", "no", "off", "pro"] {
+            assert!(!env_value_is_enabled(value), "{value} should not enable Pro");
+        }
+    }
 
     #[test]
     fn split_editor_lines_handles_lf_and_final_newline() {
