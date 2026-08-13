@@ -1,0 +1,10 @@
+[package]
+name = "rustvim"
+version = "0.1.0"
+edition = "2021"
+description = "A small from-scratch modal terminal editor prototype"
+license = "MIT"
+
+[[bin]]
+name = "rustvim"
+path = "src/main.rs"

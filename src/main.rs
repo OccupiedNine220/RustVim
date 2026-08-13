@@ -1,0 +1,934 @@
+use std::{
+    cmp::{max, min},
+    env, fs,
+    io::{self, Read, Write},
+    path::PathBuf,
+    process::Command,
+};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Normal,
+    Insert,
+    VisualLine,
+    Command,
+}
+
+enum Key {
+    Char(char),
+    Enter,
+    Esc,
+    Backspace,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    CtrlC,
+    Unknown,
+}
+
+struct RawTerminal;
+
+impl RawTerminal {
+    fn enter() -> io::Result<Self> {
+        run_stty(&["raw", "-echo", "min", "0", "time", "1"])?;
+        print!("\x1b[?25l");
+        io::stdout().flush()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawTerminal {
+    fn drop(&mut self) {
+        let _ = run_stty(&["sane"]);
+        print!("\x1b[?25h\x1b[0m");
+        let _ = io::stdout().flush();
+    }
+}
+
+struct Editor {
+    path: PathBuf,
+    lines: Vec<String>,
+    cursor_line: usize,
+    cursor_col: usize,
+    mode: Mode,
+    dirty: bool,
+    message: String,
+    command: String,
+    command_prompt: char,
+    clipboard: Vec<String>,
+    undo: Vec<Vec<String>>,
+    pending: Option<char>,
+    visual_anchor: usize,
+    search: Option<String>,
+    show_numbers: bool,
+}
+
+impl Editor {
+    fn open(path: PathBuf) -> io::Result<Self> {
+        let lines = match fs::read_to_string(&path) {
+            Ok(content) => {
+                let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
+                if lines.is_empty() {
+                    lines.push(String::new());
+                }
+                lines
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => vec![String::new()],
+            Err(error) => return Err(error),
+        };
+
+        Ok(Self {
+            path,
+            lines,
+            cursor_line: 0,
+            cursor_col: 0,
+            mode: Mode::Normal,
+            dirty: false,
+            message: String::from("Ready. :help for commands."),
+            command: String::new(),
+            command_prompt: ':',
+            clipboard: Vec::new(),
+            undo: Vec::new(),
+            pending: None,
+            visual_anchor: 0,
+            search: None,
+            show_numbers: true,
+        })
+    }
+
+    fn render(&self) -> io::Result<()> {
+        print!("\x1b[2J\x1b[H");
+        println!(
+            "RustVim 0.2 | {}{} | line {}, col {}",
+            self.path.display(),
+            if self.dirty { " [+]" } else { "" },
+            self.cursor_line + 1,
+            self.cursor_col + 1
+        );
+        println!("{}", "-".repeat(88));
+
+        let (sel_start, sel_end) = self.selection_bounds();
+        for (index, line) in self.lines.iter().enumerate() {
+            let selected = self.mode == Mode::VisualLine && (sel_start..=sel_end).contains(&index);
+            let cursor = index == self.cursor_line;
+            let marker = match (cursor, selected) {
+                (true, true) => ">*",
+                (true, false) => "> ",
+                (false, true) => " *",
+                (false, false) => "  ",
+            };
+            if self.show_numbers {
+                println!("{}{:>4} | {}", marker, index + 1, line);
+            } else {
+                println!("{} {}", marker, line);
+            }
+        }
+
+        println!("{}", "-".repeat(88));
+        let mode = match self.mode {
+            Mode::Normal => "NORMAL",
+            Mode::Insert => "INSERT",
+            Mode::VisualLine => "VISUAL LINE",
+            Mode::Command => "COMMAND",
+        };
+        if self.mode == Mode::Command {
+            println!("[{}] {}{}", mode, self.command_prompt, self.command);
+        } else {
+            println!("[{}] {}", mode, self.message);
+        }
+        io::stdout().flush()
+    }
+
+    fn handle_key(&mut self, key: Key) -> io::Result<bool> {
+        match self.mode {
+            Mode::Normal => self.handle_normal(key),
+            Mode::Insert => {
+                self.handle_insert(key);
+                Ok(false)
+            }
+            Mode::VisualLine => {
+                self.handle_visual(key);
+                Ok(false)
+            }
+            Mode::Command => self.handle_command(key),
+        }
+    }
+
+    fn handle_normal(&mut self, key: Key) -> io::Result<bool> {
+        if let Some(pending) = self.pending.take() {
+            return self.handle_pending(pending, key);
+        }
+
+        match key {
+            Key::Char(':') => {
+                self.command.clear();
+                self.command_prompt = ':';
+                self.mode = Mode::Command;
+            }
+            Key::Char('/') => {
+                self.command.clear();
+                self.command_prompt = '/';
+                self.mode = Mode::Command;
+            }
+            Key::Char('i') => {
+                self.mode = Mode::Insert;
+                self.message = String::from("Insert mode.");
+            }
+            Key::Char('a') => {
+                self.move_right();
+                self.mode = Mode::Insert;
+                self.message = String::from("Append mode.");
+            }
+            Key::Char('I') => {
+                self.cursor_col = first_non_blank(&self.lines[self.cursor_line]);
+                self.mode = Mode::Insert;
+                self.message = String::from("Insert at first non-blank.");
+            }
+            Key::Char('A') => {
+                self.cursor_col = self.current_line_len();
+                self.mode = Mode::Insert;
+                self.message = String::from("Append at end of line.");
+            }
+            Key::Char('o') => {
+                self.snapshot();
+                self.cursor_line += 1;
+                self.lines.insert(self.cursor_line, String::new());
+                self.cursor_col = 0;
+                self.dirty = true;
+                self.mode = Mode::Insert;
+            }
+            Key::Char('O') => {
+                self.snapshot();
+                self.lines.insert(self.cursor_line, String::new());
+                self.cursor_col = 0;
+                self.dirty = true;
+                self.mode = Mode::Insert;
+            }
+            Key::Char('v') | Key::Char('V') => {
+                self.mode = Mode::VisualLine;
+                self.visual_anchor = self.cursor_line;
+                self.message = String::from("Line selection. Use arrows, y, d, Esc.");
+            }
+            Key::Char('g' | 'd' | 'y' | 'c' | 'r' | '>' | '<') => self.pending = match key {
+                Key::Char(ch) => Some(ch),
+                _ => None,
+            },
+            Key::Char('p') => self.paste_after(),
+            Key::Char('P') => self.paste_before(),
+            Key::Char('x') => self.delete_char(),
+            Key::Char('u') => self.undo(),
+            Key::Char('D') => self.delete_to_end_of_line(),
+            Key::Char('C') => self.change_to_end_of_line(),
+            Key::Char('J') => self.join_with_next_line(),
+            Key::Char('w') => self.move_word_forward(),
+            Key::Char('b') => self.move_word_backward(),
+            Key::Char('e') => self.move_word_end(),
+            Key::Char('n') => self.search_next(),
+            Key::Char('N') => self.search_previous(),
+            Key::Char('0') => self.cursor_col = 0,
+            Key::Char('$') => self.cursor_col = self.current_line_len(),
+            Key::Char('G') => self.move_to_last_line(),
+            Key::Char('h' | 'j' | 'k' | 'l') => self.subscription_for_hjkl(),
+            Key::ArrowUp => self.move_up(),
+            Key::ArrowDown => self.move_down(),
+            Key::ArrowLeft => self.move_left(),
+            Key::ArrowRight => self.move_right(),
+            Key::Esc => self.message.clear(),
+            Key::CtrlC => return Ok(true),
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn handle_pending(&mut self, pending: char, key: Key) -> io::Result<bool> {
+        match (pending, key) {
+            ('g', Key::Char('g')) => {
+                self.cursor_line = 0;
+                self.clamp_cursor();
+            }
+            ('d', Key::Char('d')) => self.delete_current_line(),
+            ('y', Key::Char('y')) => self.yank_current_line(),
+            ('c', Key::Char('c')) => {
+                self.delete_current_line();
+                self.lines.insert(self.cursor_line, String::new());
+                self.mode = Mode::Insert;
+                self.message = String::from("Changed line.");
+            }
+            ('r', Key::Char(ch)) if !ch.is_control() => self.replace_char(ch),
+            ('>', Key::Char('>')) => self.indent_current_line(),
+            ('<', Key::Char('<')) => self.outdent_current_line(),
+            (first, Key::Char(second)) => self.message = format!("Unknown command: {first}{second}"),
+            (first, _) => self.message = format!("Cancelled pending command: {first}"),
+        }
+        Ok(false)
+    }
+
+    fn handle_insert(&mut self, key: Key) {
+        match key {
+            Key::Esc => {
+                self.mode = Mode::Normal;
+                self.message = String::from("Normal mode.");
+            }
+            Key::Enter => {
+                self.snapshot();
+                let rest = self.lines[self.cursor_line].split_off(self.cursor_col);
+                self.cursor_line += 1;
+                self.lines.insert(self.cursor_line, rest);
+                self.cursor_col = 0;
+                self.dirty = true;
+            }
+            Key::Backspace => self.backspace(),
+            Key::ArrowUp => self.move_up(),
+            Key::ArrowDown => self.move_down(),
+            Key::ArrowLeft => self.move_left(),
+            Key::ArrowRight => self.move_right(),
+            Key::Char(ch) if !ch.is_control() => self.insert_char(ch),
+            _ => {}
+        }
+    }
+
+    fn handle_visual(&mut self, key: Key) {
+        match key {
+            Key::Esc | Key::Char('v') | Key::Char('V') => {
+                self.mode = Mode::Normal;
+                self.message = String::from("Selection cleared.");
+            }
+            Key::ArrowUp => self.move_up(),
+            Key::ArrowDown => self.move_down(),
+            Key::Char('h' | 'j' | 'k' | 'l') => self.subscription_for_hjkl(),
+            Key::Char('y') => {
+                self.yank_selection();
+                self.mode = Mode::Normal;
+            }
+            Key::Char('d') => {
+                self.delete_selection();
+                self.mode = Mode::Normal;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_command(&mut self, key: Key) -> io::Result<bool> {
+        match key {
+            Key::Esc => {
+                self.mode = Mode::Normal;
+                self.command.clear();
+            }
+            Key::Enter => {
+                let command = self.command.clone();
+                let prompt = self.command_prompt;
+                self.command.clear();
+                self.mode = Mode::Normal;
+                return if prompt == '/' {
+                    self.execute_search(&command);
+                    Ok(false)
+                } else {
+                    self.execute_command(&command)
+                };
+            }
+            Key::Backspace => {
+                self.command.pop();
+            }
+            Key::Char(ch) if !ch.is_control() => self.command.push(ch),
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn execute_command(&mut self, command: &str) -> io::Result<bool> {
+        match command {
+            "w" => self.save()?,
+            "q" => {
+                self.message = String::from(
+                    "Exit requires an active RustVim Pro subscription.",
+                );
+            }
+            "wq" | "x" => {
+                self.save()?;
+                self.message = String::from(
+                    "Saved, but exit still requires RustVim Pro.",
+                );
+            }
+            "q!" | "qa" | "qa!" => {
+                self.message = String::from("Forced exit also requires an active RustVim Pro subscription.");
+            }
+            "help" => {
+                self.message = String::from(
+                    "i/a/I/A/o/O | arrows | hjkl Pro | V y d | dd yy cc p x r D C J u w b e n N >> << | / :s :set :e :w",
+                );
+            }
+            "set number" | "set nu" => {
+                self.show_numbers = true;
+                self.message = String::from("Line numbers enabled.");
+            }
+            "set nonumber" | "set nonu" => {
+                self.show_numbers = false;
+                self.message = String::from("Line numbers disabled.");
+            }
+            digits if digits.chars().all(|ch| ch.is_ascii_digit()) && !digits.is_empty() => {
+                let line = digits.parse::<usize>().unwrap_or(1).saturating_sub(1);
+                self.cursor_line = min(line, self.lines.len().saturating_sub(1));
+                self.clamp_cursor();
+            }
+            other if other.starts_with("w ") => {
+                let path = PathBuf::from(other[2..].trim());
+                self.save_as(path)?;
+            }
+            other if other.starts_with("e ") => {
+                let path = PathBuf::from(other[2..].trim());
+                self.reload(path)?;
+            }
+            other if other.starts_with("%s/") || other.starts_with("s/") => self.substitute(other),
+            _ => self.message = format!("Unknown command: :{command}"),
+        }
+        Ok(false)
+    }
+
+    fn save(&mut self) -> io::Result<()> {
+        fs::write(&self.path, format!("{}\n", self.lines.join("\n")))?;
+        self.dirty = false;
+        self.message = format!("Saved: {}", self.path.display());
+        Ok(())
+    }
+
+    fn save_as(&mut self, path: PathBuf) -> io::Result<()> {
+        if path.as_os_str().is_empty() {
+            self.message = String::from("Missing file name.");
+            return Ok(());
+        }
+        fs::write(&path, format!("{}\n", self.lines.join("\n")))?;
+        self.path = path;
+        self.dirty = false;
+        self.message = format!("Saved as: {}", self.path.display());
+        Ok(())
+    }
+
+    fn reload(&mut self, path: PathBuf) -> io::Result<()> {
+        if path.as_os_str().is_empty() {
+            self.message = String::from("Missing file name.");
+            return Ok(());
+        }
+        let content = fs::read_to_string(&path)?;
+        let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        self.snapshot();
+        self.path = path;
+        self.lines = lines;
+        self.cursor_line = 0;
+        self.cursor_col = 0;
+        self.dirty = false;
+        self.message = String::from("File loaded.");
+        Ok(())
+    }
+
+    fn execute_search(&mut self, query: &str) {
+        if query.is_empty() {
+            self.message = String::from("Empty search.");
+            return;
+        }
+        self.search = Some(query.to_owned());
+        self.search_next();
+    }
+
+    fn substitute(&mut self, command: &str) {
+        let global = command.ends_with("/g");
+        let trimmed = if global {
+            &command[..command.len().saturating_sub(2)]
+        } else {
+            command
+        };
+        let spec = trimmed.strip_prefix("%s/").or_else(|| trimmed.strip_prefix("s/"));
+        let Some(spec) = spec else {
+            self.message = String::from("Substitute syntax: :%s/old/new/g");
+            return;
+        };
+        let mut parts = spec.splitn(3, '/');
+        let old = parts.next().unwrap_or("");
+        let new = parts.next().unwrap_or("");
+        if old.is_empty() {
+            self.message = String::from("Substitute needs a non-empty pattern.");
+            return;
+        }
+
+        self.snapshot();
+        let mut changed = 0;
+        if command.starts_with("%s/") {
+            for line in &mut self.lines {
+                if line.contains(old) {
+                    changed += line.matches(old).count();
+                    *line = if global {
+                        line.replace(old, new)
+                    } else {
+                        line.replacen(old, new, 1)
+                    };
+                }
+            }
+        } else if self.lines[self.cursor_line].contains(old) {
+            changed = self.lines[self.cursor_line].matches(old).count();
+            self.lines[self.cursor_line] = if global {
+                self.lines[self.cursor_line].replace(old, new)
+            } else {
+                changed = 1;
+                self.lines[self.cursor_line].replacen(old, new, 1)
+            };
+        }
+
+        if changed == 0 {
+            let _ = self.undo.pop();
+            self.message = format!("Pattern not found: {old}");
+        } else {
+            self.dirty = true;
+            self.clamp_cursor();
+            self.message = format!("Substituted {changed} occurrence(s).");
+        }
+    }
+
+    fn insert_char(&mut self, ch: char) {
+        self.snapshot();
+        self.lines[self.cursor_line].insert(self.cursor_col, ch);
+        self.cursor_col += ch.len_utf8();
+        self.dirty = true;
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor_col > 0 {
+            self.snapshot();
+            let line = &mut self.lines[self.cursor_line];
+            if let Some((index, _)) = line[..self.cursor_col].char_indices().last() {
+                line.drain(index..self.cursor_col);
+                self.cursor_col = index;
+                self.dirty = true;
+            }
+        } else if self.cursor_line > 0 {
+            self.snapshot();
+            let removed = self.lines.remove(self.cursor_line);
+            self.cursor_line -= 1;
+            self.cursor_col = self.lines[self.cursor_line].len();
+            self.lines[self.cursor_line].push_str(&removed);
+            self.dirty = true;
+        }
+    }
+
+    fn delete_char(&mut self) {
+        if self.lines[self.cursor_line].is_empty() {
+            return;
+        }
+        self.snapshot();
+        let line = &mut self.lines[self.cursor_line];
+        if self.cursor_col >= line.len() {
+            self.cursor_col = line.len().saturating_sub(1);
+        }
+        if let Some(ch) = line[self.cursor_col..].chars().next() {
+            line.drain(self.cursor_col..self.cursor_col + ch.len_utf8());
+            self.dirty = true;
+            self.message = String::from("Deleted character.");
+        }
+    }
+
+    fn replace_char(&mut self, ch: char) {
+        if self.lines[self.cursor_line].is_empty() {
+            self.message = String::from("Nothing to replace.");
+            return;
+        }
+        self.snapshot();
+        let line = &mut self.lines[self.cursor_line];
+        if self.cursor_col >= line.len() {
+            self.cursor_col = line.len().saturating_sub(1);
+        }
+        if let Some(old) = line[self.cursor_col..].chars().next() {
+            line.drain(self.cursor_col..self.cursor_col + old.len_utf8());
+            line.insert(self.cursor_col, ch);
+            self.dirty = true;
+            self.message = String::from("Replaced character.");
+        }
+    }
+
+    fn delete_to_end_of_line(&mut self) {
+        self.snapshot();
+        self.lines[self.cursor_line].truncate(self.cursor_col);
+        self.dirty = true;
+        self.message = String::from("Deleted to end of line.");
+    }
+
+    fn change_to_end_of_line(&mut self) {
+        self.delete_to_end_of_line();
+        self.mode = Mode::Insert;
+        self.message = String::from("Change to end of line.");
+    }
+
+    fn delete_current_line(&mut self) {
+        self.snapshot();
+        self.clipboard = vec![self.lines.remove(self.cursor_line)];
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.cursor_line = min(self.cursor_line, self.lines.len() - 1);
+        self.cursor_col = 0;
+        self.dirty = true;
+        self.message = String::from("Deleted line.");
+    }
+
+    fn yank_current_line(&mut self) {
+        self.clipboard = vec![self.lines[self.cursor_line].clone()];
+        self.message = String::from("Yanked line.");
+    }
+
+    fn join_with_next_line(&mut self) {
+        if self.cursor_line + 1 >= self.lines.len() {
+            self.message = String::from("No next line to join.");
+            return;
+        }
+        self.snapshot();
+        let next = self.lines.remove(self.cursor_line + 1);
+        if !self.lines[self.cursor_line].ends_with(' ') && !next.is_empty() {
+            self.lines[self.cursor_line].push(' ');
+        }
+        self.lines[self.cursor_line].push_str(next.trim_start());
+        self.dirty = true;
+        self.message = String::from("Joined lines.");
+    }
+
+    fn indent_current_line(&mut self) {
+        self.snapshot();
+        self.lines[self.cursor_line].insert_str(0, "    ");
+        self.cursor_col += 4;
+        self.dirty = true;
+        self.message = String::from("Indented line.");
+    }
+
+    fn outdent_current_line(&mut self) {
+        let remove = self.lines[self.cursor_line]
+            .chars()
+            .take_while(|ch| *ch == ' ')
+            .take(4)
+            .count();
+        if remove == 0 {
+            self.message = String::from("Line is not indented.");
+            return;
+        }
+        self.snapshot();
+        self.lines[self.cursor_line].drain(0..remove);
+        self.cursor_col = self.cursor_col.saturating_sub(remove);
+        self.dirty = true;
+        self.message = String::from("Outdented line.");
+    }
+
+    fn yank_selection(&mut self) {
+        let (start, end) = self.selection_bounds();
+        self.clipboard = self.lines[start..=end].to_vec();
+        self.message = format!("Yanked {} line(s).", self.clipboard.len());
+    }
+
+    fn delete_selection(&mut self) {
+        let (start, end) = self.selection_bounds();
+        self.snapshot();
+        self.clipboard = self.lines[start..=end].to_vec();
+        self.lines.drain(start..=end);
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.cursor_line = min(start, self.lines.len() - 1);
+        self.cursor_col = 0;
+        self.dirty = true;
+        self.message = format!("Deleted {} line(s).", self.clipboard.len());
+    }
+
+    fn paste_after(&mut self) {
+        if self.clipboard.is_empty() {
+            self.message = String::from("Clipboard is empty.");
+            return;
+        }
+        self.snapshot();
+        let insert_at = min(self.cursor_line + 1, self.lines.len());
+        for (offset, line) in self.clipboard.clone().into_iter().enumerate() {
+            self.lines.insert(insert_at + offset, line);
+        }
+        self.cursor_line = insert_at;
+        self.cursor_col = 0;
+        self.dirty = true;
+        self.message = String::from("Pasted after cursor.");
+    }
+
+    fn paste_before(&mut self) {
+        if self.clipboard.is_empty() {
+            self.message = String::from("Clipboard is empty.");
+            return;
+        }
+        self.snapshot();
+        let insert_at = self.cursor_line;
+        for (offset, line) in self.clipboard.clone().into_iter().enumerate() {
+            self.lines.insert(insert_at + offset, line);
+        }
+        self.cursor_col = 0;
+        self.dirty = true;
+        self.message = String::from("Pasted before cursor.");
+    }
+
+    fn undo(&mut self) {
+        if let Some(lines) = self.undo.pop() {
+            self.lines = lines;
+            self.cursor_line = min(self.cursor_line, self.lines.len() - 1);
+            self.clamp_cursor();
+            self.dirty = true;
+            self.message = String::from("Undo.");
+        } else {
+            self.message = String::from("Nothing to undo.");
+        }
+    }
+
+    fn snapshot(&mut self) {
+        self.undo.push(self.lines.clone());
+        if self.undo.len() > 100 {
+            self.undo.remove(0);
+        }
+    }
+
+    fn selection_bounds(&self) -> (usize, usize) {
+        (
+            min(self.visual_anchor, self.cursor_line),
+            max(self.visual_anchor, self.cursor_line),
+        )
+    }
+
+    fn move_up(&mut self) {
+        self.cursor_line = self.cursor_line.saturating_sub(1);
+        self.clamp_cursor();
+    }
+
+    fn move_down(&mut self) {
+        self.cursor_line = min(self.cursor_line + 1, self.lines.len() - 1);
+        self.clamp_cursor();
+    }
+
+    fn move_left(&mut self) {
+        if self.cursor_col > 0 {
+            if let Some((index, _)) = self.lines[self.cursor_line][..self.cursor_col].char_indices().last() {
+                self.cursor_col = index;
+            }
+        }
+    }
+
+    fn move_right(&mut self) {
+        let line = &self.lines[self.cursor_line];
+        if self.cursor_col < line.len() {
+            if let Some(ch) = line[self.cursor_col..].chars().next() {
+                self.cursor_col += ch.len_utf8();
+            }
+        }
+    }
+
+    fn move_to_last_line(&mut self) {
+        self.cursor_line = self.lines.len() - 1;
+        self.clamp_cursor();
+    }
+
+    fn move_word_forward(&mut self) {
+        let mut pos = self.absolute_cursor();
+        let text = self.full_text();
+        let chars: Vec<(usize, char)> = text.char_indices().collect();
+        while let Some((byte, ch)) = next_char_at(&chars, pos) {
+            if *byte > pos && is_word_char(*ch) {
+                pos = *byte;
+                break;
+            }
+            pos = byte + ch.len_utf8();
+        }
+        self.set_absolute_cursor(pos);
+    }
+
+    fn move_word_backward(&mut self) {
+        let text = self.full_text();
+        let before = &text[..min(self.absolute_cursor(), text.len())];
+        let mut target = None;
+        let mut in_word = false;
+        for (index, ch) in before.char_indices().rev() {
+            if is_word_char(ch) {
+                target = Some(index);
+                in_word = true;
+            } else if in_word {
+                break;
+            }
+        }
+        if let Some(pos) = target {
+            self.set_absolute_cursor(pos);
+        }
+    }
+
+    fn move_word_end(&mut self) {
+        let mut pos = self.absolute_cursor();
+        let text = self.full_text();
+        let chars: Vec<(usize, char)> = text.char_indices().collect();
+        let mut seen_word = false;
+        while let Some((byte, ch)) = next_char_at(&chars, pos) {
+            if is_word_char(*ch) {
+                seen_word = true;
+                pos = *byte + ch.len_utf8();
+            } else if seen_word {
+                break;
+            } else {
+                pos = *byte + ch.len_utf8();
+            }
+        }
+        self.set_absolute_cursor(pos.saturating_sub(1));
+    }
+
+    fn search_next(&mut self) {
+        let Some(query) = self.search.clone() else {
+            self.message = String::from("No previous search.");
+            return;
+        };
+        let text = self.full_text();
+        let start = min(self.absolute_cursor() + 1, text.len());
+        let found = text[start..]
+            .find(&query)
+            .map(|offset| start + offset)
+            .or_else(|| text[..start].find(&query));
+        if let Some(pos) = found {
+            self.set_absolute_cursor(pos);
+            self.message = format!("Found: {query}");
+        } else {
+            self.message = format!("Pattern not found: {query}");
+        }
+    }
+
+    fn search_previous(&mut self) {
+        let Some(query) = self.search.clone() else {
+            self.message = String::from("No previous search.");
+            return;
+        };
+        let text = self.full_text();
+        let start = min(self.absolute_cursor(), text.len());
+        let found = text[..start]
+            .rfind(&query)
+            .or_else(|| text[start..].rfind(&query).map(|offset| start + offset));
+        if let Some(pos) = found {
+            self.set_absolute_cursor(pos);
+            self.message = format!("Found: {query}");
+        } else {
+            self.message = format!("Pattern not found: {query}");
+        }
+    }
+
+    fn absolute_cursor(&self) -> usize {
+        let mut pos = 0;
+        for index in 0..self.cursor_line {
+            pos += self.lines[index].len() + 1;
+        }
+        pos + self.cursor_col
+    }
+
+    fn set_absolute_cursor(&mut self, mut pos: usize) {
+        for (index, line) in self.lines.iter().enumerate() {
+            if pos <= line.len() {
+                self.cursor_line = index;
+                self.cursor_col = pos;
+                self.clamp_cursor();
+                return;
+            }
+            pos = pos.saturating_sub(line.len() + 1);
+        }
+        self.move_to_last_line();
+    }
+
+    fn full_text(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    fn clamp_cursor(&mut self) {
+        self.cursor_col = min(self.cursor_col, self.current_line_len());
+    }
+
+    fn current_line_len(&self) -> usize {
+        self.lines[self.cursor_line].len()
+    }
+
+    fn subscription_for_hjkl(&mut self) {
+        self.message = String::from("h/j/k/l navigation is included in RustVim Pro. Use arrow keys for the free tier.");
+    }
+}
+
+fn read_key() -> io::Result<Key> {
+    let mut byte = [0_u8; 1];
+    loop {
+        if io::stdin().read(&mut byte)? == 1 {
+            break;
+        }
+    }
+    match byte[0] {
+        3 => Ok(Key::CtrlC),
+        13 | 10 => Ok(Key::Enter),
+        27 => read_escape_sequence(),
+        127 | 8 => Ok(Key::Backspace),
+        b => Ok(std::str::from_utf8(&[b])
+            .ok()
+            .and_then(|s| s.chars().next())
+            .map(Key::Char)
+            .unwrap_or(Key::Unknown)),
+    }
+}
+
+fn read_escape_sequence() -> io::Result<Key> {
+    let mut seq = [0_u8; 2];
+    if io::stdin().read(&mut seq[..1])? == 0 {
+        return Ok(Key::Esc);
+    }
+    if seq[0] != b'[' {
+        return Ok(Key::Esc);
+    }
+    if io::stdin().read(&mut seq[1..2])? == 0 {
+        return Ok(Key::Esc);
+    }
+    match seq[1] {
+        b'A' => Ok(Key::ArrowUp),
+        b'B' => Ok(Key::ArrowDown),
+        b'C' => Ok(Key::ArrowRight),
+        b'D' => Ok(Key::ArrowLeft),
+        _ => Ok(Key::Unknown),
+    }
+}
+
+fn run_stty(args: &[&str]) -> io::Result<()> {
+    let status = Command::new("stty").args(args).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(io::ErrorKind::Other, "stty failed"))
+    }
+}
+
+fn first_non_blank(line: &str) -> usize {
+    line.char_indices()
+        .find(|(_, ch)| !ch.is_whitespace())
+        .map(|(index, _)| index)
+        .unwrap_or(0)
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn next_char_at(chars: &[(usize, char)], pos: usize) -> Option<&(usize, char)> {
+    chars.iter().find(|(byte, _)| *byte >= pos)
+}
+
+fn main() -> io::Result<()> {
+    let path = env::args_os()
+        .nth(1)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("untitled.txt"));
+    let _raw = RawTerminal::enter()?;
+    let mut editor = Editor::open(path)?;
+
+    loop {
+        editor.render()?;
+        if editor.handle_key(read_key()?)? {
+            break;
+        }
+    }
+
+    println!("\x1b[2J\x1b[HBye.");
+    Ok(())
+}
