@@ -8,6 +8,7 @@ use std::{
 };
 
 const PRO_ENV_VAR: &str = "RUSTVIM_PRO";
+const AI_COMMAND_ENV_VAR: &str = "RUSTVIM_AI_COMMAND";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -82,6 +83,7 @@ struct Editor {
     show_numbers: bool,
     use_alternate_buffer: bool,
     pro_active: bool,
+    syntax_enabled: bool,
 }
 
 impl Editor {
@@ -120,6 +122,7 @@ impl Editor {
             show_numbers: true,
             use_alternate_buffer: true,
             pro_active,
+            syntax_enabled: pro_active,
         })
     }
 
@@ -132,7 +135,9 @@ impl Editor {
             let cursor = index == self.cursor_line;
             let marker = line_marker(cursor, selected);
             let rendered_line = if cursor {
-                render_cursor_line(line, self.cursor_col)
+                render_cursor_line(line, self.cursor_col, syntax_for_path(&self.path).filter(|_| self.syntax_active()))
+            } else if self.syntax_active() {
+                highlight_syntax(line, syntax_for_path(&self.path))
             } else {
                 line.to_owned()
             };
@@ -387,9 +392,21 @@ impl Editor {
             }
             "help" => {
                 self.message = String::from(
-                    "i/a/I/A/o/O | arrows | hjkl Pro | V y d | dd yy cc p x r D C J u w b e n N >> << | / :s :set :e :w :q",
+                    "i/a/I/A/o/O | arrows | hjkl Pro | V y d | dd yy cc p x r D C J u w b e n N >> << | / :s :set :e :w :q :ai",
                 );
             }
+            "set syntax" if self.pro_active => {
+                self.syntax_enabled = true;
+                self.message = String::from("Syntax highlighting enabled.");
+            }
+            "set nosyntax" => {
+                self.syntax_enabled = false;
+                self.message = String::from("Syntax highlighting disabled.");
+            }
+            other if other == "ai" || other.starts_with("ai ") => {
+                self.run_ai(other.strip_prefix("ai ").unwrap_or("Summarize this file"))?;
+            }
+            "ai-summary" => self.run_ai("Summarize this file")?,
             "set number" | "set nu" => {
                 self.show_numbers = true;
                 self.message = String::from("Line numbers enabled.");
@@ -950,6 +967,49 @@ impl Editor {
         self.lines[self.cursor_line].len()
     }
 
+    fn syntax_active(&self) -> bool {
+        self.pro_active && self.syntax_enabled && syntax_for_path(&self.path).is_some()
+    }
+
+    fn run_ai(&mut self, prompt: &str) -> io::Result<()> {
+        if !self.pro_active {
+            self.message = String::from("AI features require an active RustVim Pro subscription.");
+            return Ok(());
+        }
+        let Ok(command) = env::var(AI_COMMAND_ENV_VAR) else {
+            self.message = format!("Set {AI_COMMAND_ENV_VAR} to use :ai.");
+            return Ok(());
+        };
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .env("RUSTVIM_AI_PROMPT", prompt)
+            .env("RUSTVIM_AI_FILE", self.path.to_string_lossy().as_ref())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(self.full_text().as_bytes())?;
+                }
+                child.wait_with_output()
+            });
+        match output {
+            Ok(output) if output.status.success() => {
+                let response = String::from_utf8_lossy(&output.stdout);
+                let response = response.lines().next().unwrap_or("AI returned no output").trim();
+                self.message = format!("AI: {}", truncate_message(response, 180));
+            }
+            Ok(output) => {
+                let error = String::from_utf8_lossy(&output.stderr);
+                self.message = format!("AI failed: {}", truncate_message(error.trim(), 160));
+            }
+            Err(error) => self.message = format!("AI failed to start: {error}"),
+        }
+        Ok(())
+    }
+
     fn handle_hjkl(&mut self, key: char) {
         if !self.pro_active {
             self.message = String::from(
@@ -987,6 +1047,117 @@ fn env_value_is_enabled(value: &str) -> bool {
         value.trim().to_ascii_lowercase().as_str(),
         "1" | "true" | "yes" | "on" | "enabled"
     )
+}
+
+#[derive(Clone, Copy)]
+enum Syntax {
+    Rust,
+    Python,
+    JavaScript,
+    Json,
+    Shell,
+    Markdown,
+}
+
+fn syntax_for_path(path: &PathBuf) -> Option<Syntax> {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "rs" => Some(Syntax::Rust),
+        "py" => Some(Syntax::Python),
+        "js" | "jsx" | "ts" | "tsx" => Some(Syntax::JavaScript),
+        "json" => Some(Syntax::Json),
+        "sh" | "bash" | "zsh" => Some(Syntax::Shell),
+        "md" | "markdown" => Some(Syntax::Markdown),
+        _ => None,
+    }
+}
+
+fn highlight_syntax(line: &str, syntax: Option<Syntax>) -> String {
+    let Some(syntax) = syntax else { return line.to_owned() };
+    let keywords = match syntax {
+        Syntax::Rust => "fn let mut struct enum impl pub use mod match if else for in return Self self true false",
+        Syntax::Python => "def class import from as if elif else for while in return True False None and or not",
+        Syntax::JavaScript => "const let var function return if else for while import from export true false null undefined",
+        Syntax::Json => "true false null",
+        Syntax::Shell => "if then else fi for in do done case esac function export local",
+        Syntax::Markdown => "",
+    };
+    let comment_markers = match syntax {
+        Syntax::Rust | Syntax::JavaScript => &["//"][..],
+        Syntax::Python | Syntax::Shell => &["#"][..],
+        Syntax::Json | Syntax::Markdown => &[][..],
+    };
+    let mut result = String::new();
+    let chars: Vec<char> = line.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let rest: String = chars[index..].iter().collect();
+        if comment_markers.iter().any(|marker| rest.starts_with(marker)) {
+            result.push_str("\x1b[90m");
+            result.extend(chars[index..].iter());
+            result.push_str("\x1b[0m");
+            break;
+        }
+        let ch = chars[index];
+        if ch == '"' || ch == '\'' || ch == '`' {
+            let quote = ch;
+            let start = index;
+            index += 1;
+            while index < chars.len() {
+                if chars[index] == quote && chars[index.saturating_sub(1)] != '\\' {
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+            result.push_str("\x1b[32m");
+            result.extend(chars[start..index].iter());
+            result.push_str("\x1b[0m");
+        } else if ch.is_ascii_digit() {
+            let start = index;
+            index += 1;
+            while index < chars.len() && (chars[index].is_ascii_digit() || chars[index] == '.') {
+                index += 1;
+            }
+            result.push_str("\x1b[33m");
+            result.extend(chars[start..index].iter());
+            result.push_str("\x1b[0m");
+        } else if ch.is_alphanumeric() || ch == '_' {
+            let start = index;
+            index += 1;
+            while index < chars.len() && (chars[index].is_alphanumeric() || chars[index] == '_') {
+                index += 1;
+            }
+            let word: String = chars[start..index].iter().collect();
+            if keywords.split_whitespace().any(|keyword| keyword == word) {
+                result.push_str("\x1b[35m");
+                result.push_str(&word);
+                result.push_str("\x1b[0m");
+            } else {
+                result.push_str(&word);
+            }
+        } else {
+            result.push(ch);
+            index += 1;
+        }
+    }
+    result
+}
+
+fn render_cursor_line(line: &str, cursor_col: usize, syntax: Option<Syntax>) -> String {
+    let cursor_col = min(cursor_col, line.len());
+    let Some(ch) = line[cursor_col..].chars().next() else {
+        return format!("{}\x1b[7m \x1b[0m", highlight_syntax(line, syntax));
+    };
+    let end = cursor_col + ch.len_utf8();
+    let prefix = &line[..cursor_col];
+    let suffix = &line[end..];
+    format!("{}\x1b[7m{}\x1b[0m{}", highlight_syntax(prefix, syntax), ch, highlight_syntax(suffix, syntax))
+}
+
+fn truncate_message(message: &str, max_len: usize) -> String {
+    let mut result = message.chars().take(max_len).collect::<String>();
+    if message.chars().count() > max_len { result.push('…'); }
+    result
 }
 
 fn read_key() -> io::Result<Key> {
@@ -1089,20 +1260,6 @@ fn line_marker(cursor: bool, selected: bool) -> &'static str {
     }
 }
 
-fn render_cursor_line(line: &str, cursor_col: usize) -> String {
-    let cursor_col = min(cursor_col, line.len());
-    let Some(ch) = line[cursor_col..].chars().next() else {
-        return format!("{line}\x1b[7m \x1b[0m");
-    };
-    let end = cursor_col + ch.len_utf8();
-    format!(
-        "{}\x1b[7m{}\x1b[0m{}",
-        &line[..cursor_col],
-        &line[cursor_col..end],
-        &line[end..]
-    )
-}
-
 fn main() -> io::Result<()> {
     let path = env::args_os()
         .nth(1)
@@ -1124,7 +1281,10 @@ fn main() -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{env_value_is_enabled, serialize_editor_lines, split_editor_lines};
+    use super::{
+        env_value_is_enabled, highlight_syntax, serialize_editor_lines, split_editor_lines,
+        syntax_for_path, PathBuf, Syntax,
+    };
 
     #[test]
     fn pro_env_accepts_common_enabled_values() {
@@ -1138,6 +1298,26 @@ mod tests {
         for value in ["", "0", "false", "no", "off", "pro"] {
             assert!(!env_value_is_enabled(value), "{value} should not enable Pro");
         }
+    }
+
+    #[test]
+    fn syntax_detection_uses_file_extension() {
+        assert!(matches!(
+            syntax_for_path(&PathBuf::from("main.rs")),
+            Some(Syntax::Rust)
+        ));
+        assert!(matches!(
+            syntax_for_path(&PathBuf::from("script.py")),
+            Some(Syntax::Python)
+        ));
+        assert!(syntax_for_path(&PathBuf::from("notes.txt")).is_none());
+    }
+
+    #[test]
+    fn syntax_highlighting_adds_ansi_colors() {
+        let rendered = highlight_syntax("fn main() { 42 }", Some(Syntax::Rust));
+        assert!(rendered.contains("\x1b[35mfn\x1b[0m"));
+        assert!(rendered.contains("\x1b[33m42\x1b[0m"));
     }
 
     #[test]
