@@ -13,15 +13,7 @@ cargo run -- file.txt
 
 ```sh
 nix develop --command cargo run -- file.txt
-```
 
-## Активация RustVim Pro через env
-
-По умолчанию подписка отключена. Чтобы активировать Pro-функции, установите
-переменную окружения `RUSTVIM_PRO` в `1`, `true`, `yes`, `on` или `enabled`:
-
-```sh
-RUSTVIM_PRO=1 cargo run -- file.txt
 ```
 
 При активной подписке работают навигация `h` / `j` / `k` / `l`, выход через
@@ -29,7 +21,7 @@ RUSTVIM_PRO=1 cargo run -- file.txt
 
 ## AI-функции RustVim Pro
 
-AI-команды доступны только при активном `RUSTVIM_PRO`. Для подключения любого
+AI-команды доступны только при активной подписке. Для подключения любого
 локального или внешнего AI-клиента укажите shell-команду в `RUSTVIM_AI_COMMAND`.
 Текст текущего файла передаётся этой команде через stdin, а prompt и путь к
 файлу доступны в переменных `RUSTVIM_AI_PROMPT` и `RUSTVIM_AI_FILE`.
