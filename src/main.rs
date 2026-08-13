@@ -2,7 +2,7 @@ use std::{
     cmp::{max, min},
     env, fs,
     io::{self, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -1067,7 +1067,7 @@ enum Syntax {
     Markdown,
 }
 
-fn syntax_for_path(path: &PathBuf) -> Option<Syntax> {
+fn syntax_for_path(path: &Path) -> Option<Syntax> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "rs" => Some(Syntax::Rust),
         "py" => Some(Syntax::Python),
