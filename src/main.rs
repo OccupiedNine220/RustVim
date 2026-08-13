@@ -3,7 +3,7 @@ use std::{
     env, fs,
     io::{self, Read, Write},
     path::PathBuf,
-    process::Command,
+    process::{Command, Stdio},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -99,43 +99,44 @@ impl Editor {
 
     fn render(&self) -> io::Result<()> {
         print!("\x1b[2J\x1b[H");
-        println!(
-            "RustVim 0.2 | {}{} | line {}, col {}",
-            self.path.display(),
-            if self.dirty { " [+]" } else { "" },
-            self.cursor_line + 1,
-            self.cursor_col + 1
-        );
-        println!("{}", "-".repeat(88));
-
         let (sel_start, sel_end) = self.selection_bounds();
+        let number_width = max(4, self.lines.len().to_string().len());
         for (index, line) in self.lines.iter().enumerate() {
             let selected = self.mode == Mode::VisualLine && (sel_start..=sel_end).contains(&index);
             let cursor = index == self.cursor_line;
-            let marker = match (cursor, selected) {
-                (true, true) => ">*",
-                (true, false) => "> ",
-                (false, true) => " *",
-                (false, false) => "  ",
+            let marker = line_marker(cursor, selected);
+            let rendered_line = if cursor {
+                render_cursor_line(line, self.cursor_col)
+            } else {
+                line.to_owned()
             };
             if self.show_numbers {
-                println!("{}{:>4} | {}", marker, index + 1, line);
+                println!("{marker} {:>width$} | {rendered_line}", index + 1, width = number_width);
             } else {
-                println!("{} {}", marker, line);
+                println!("{marker} {rendered_line}");
             }
         }
+        println!("~");
+        println!("~");
 
-        println!("{}", "-".repeat(88));
         let mode = match self.mode {
             Mode::Normal => "NORMAL",
             Mode::Insert => "INSERT",
             Mode::VisualLine => "VISUAL LINE",
             Mode::Command => "COMMAND",
         };
+        println!(
+            "\x1b[7m {}{}  {}  line {}, col {} \x1b[0m",
+            self.path.display(),
+            if self.dirty { " [+]" } else { "" },
+            mode,
+            self.cursor_line + 1,
+            self.cursor_col + 1
+        );
         if self.mode == Mode::Command {
-            println!("[{}] {}{}", mode, self.command_prompt, self.command);
+            print!("{}{}", self.command_prompt, self.command);
         } else {
-            println!("[{}] {}", mode, self.message);
+            print!("{}", self.message);
         }
         io::stdout().flush()
     }
@@ -235,7 +236,7 @@ impl Editor {
             Key::ArrowLeft => self.move_left(),
             Key::ArrowRight => self.move_right(),
             Key::Esc => self.message.clear(),
-            Key::CtrlC => return Ok(true),
+            Key::CtrlC => self.subscription_for_exit(),
             _ => {}
         }
         Ok(false)
@@ -340,18 +341,17 @@ impl Editor {
         match command {
             "w" => self.save()?,
             "q" => {
-                self.message = String::from(
-                    "Exit requires an active RustVim Pro subscription.",
-                );
+                self.subscription_for_exit();
             }
             "wq" | "x" => {
                 self.save()?;
-                self.message = String::from(
-                    "Saved, but exit still requires RustVim Pro.",
-                );
+                self.message = String::from("Saved, but exit still requires RustVim Pro.");
             }
             "q!" | "qa" | "qa!" => {
-                self.message = String::from("Forced exit also requires an active RustVim Pro subscription.");
+                self.subscription_for_exit();
+            }
+            "term" => {
+                self.open_terminal(None)?;
             }
             "help" => {
                 self.message = String::from(
@@ -378,6 +378,9 @@ impl Editor {
             other if other.starts_with("e ") => {
                 let path = PathBuf::from(other[2..].trim());
                 self.reload(path)?;
+            }
+            other if other.starts_with("term ") => {
+                self.open_terminal(Some(other[5..].trim()))?;
             }
             other if other.starts_with("%s/") || other.starts_with("s/") => self.substitute(other),
             _ => self.message = format!("Unknown command: :{command}"),
@@ -837,6 +840,36 @@ impl Editor {
         self.lines.join("\n")
     }
 
+    fn open_terminal(&mut self, command: Option<&str>) -> io::Result<()> {
+        run_stty(&["sane"])?;
+        print!("\x1b[2J\x1b[H");
+        io::stdout().flush()?;
+
+        let status = if let Some(command) = command.filter(|command| !command.is_empty()) {
+            Command::new("sh")
+                .arg("-c")
+                .arg(command)
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+        } else {
+            let shell = env::var("SHELL").unwrap_or_else(|_| String::from("sh"));
+            Command::new(shell)
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+        };
+
+        run_stty(&["raw", "-echo", "min", "0", "time", "1"])?;
+        match status {
+            Ok(status) => self.message = format!("Terminal exited with status {status}."),
+            Err(error) => self.message = format!("Terminal failed: {error}"),
+        }
+        Ok(())
+    }
+
     fn clamp_cursor(&mut self) {
         self.cursor_col = min(self.cursor_col, self.current_line_len());
     }
@@ -847,6 +880,10 @@ impl Editor {
 
     fn subscription_for_hjkl(&mut self) {
         self.message = String::from("h/j/k/l navigation is included in RustVim Pro. Use arrow keys for the free tier.");
+    }
+
+    fn subscription_for_exit(&mut self) {
+        self.message = String::from("Exit requires an active RustVim Pro subscription.");
     }
 }
 
@@ -912,6 +949,29 @@ fn is_word_char(ch: char) -> bool {
 
 fn next_char_at(chars: &[(usize, char)], pos: usize) -> Option<&(usize, char)> {
     chars.iter().find(|(byte, _)| *byte >= pos)
+}
+
+fn line_marker(cursor: bool, selected: bool) -> &'static str {
+    match (cursor, selected) {
+        (true, true) => ">*",
+        (true, false) => "> ",
+        (false, true) => " *",
+        (false, false) => "  ",
+    }
+}
+
+fn render_cursor_line(line: &str, cursor_col: usize) -> String {
+    let cursor_col = min(cursor_col, line.len());
+    let Some(ch) = line[cursor_col..].chars().next() else {
+        return format!("{line}\x1b[7m \x1b[0m");
+    };
+    let end = cursor_col + ch.len_utf8();
+    format!(
+        "{}\x1b[7m{}\x1b[0m{}",
+        &line[..cursor_col],
+        &line[cursor_col..end],
+        &line[end..]
+    )
 }
 
 fn main() -> io::Result<()> {
