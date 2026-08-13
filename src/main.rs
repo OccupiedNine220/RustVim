@@ -135,7 +135,11 @@ impl Editor {
             let cursor = index == self.cursor_line;
             let marker = line_marker(cursor, selected);
             let rendered_line = if cursor {
-                render_cursor_line(line, self.cursor_col, syntax_for_path(&self.path).filter(|_| self.syntax_active()))
+                render_cursor_line(
+                    line,
+                    self.cursor_col,
+                    syntax_for_path(&self.path).filter(|_| self.syntax_active()),
+                )
             } else if self.syntax_active() {
                 highlight_syntax(line, syntax_for_path(&self.path))
             } else {
@@ -998,7 +1002,11 @@ impl Editor {
         match output {
             Ok(output) if output.status.success() => {
                 let response = String::from_utf8_lossy(&output.stdout);
-                let response = response.lines().next().unwrap_or("AI returned no output").trim();
+                let response = response
+                    .lines()
+                    .next()
+                    .unwrap_or("AI returned no output")
+                    .trim();
                 self.message = format!("AI: {}", truncate_message(response, 180));
             }
             Ok(output) => {
@@ -1072,7 +1080,9 @@ fn syntax_for_path(path: &PathBuf) -> Option<Syntax> {
 }
 
 fn highlight_syntax(line: &str, syntax: Option<Syntax>) -> String {
-    let Some(syntax) = syntax else { return line.to_owned() };
+    let Some(syntax) = syntax else {
+        return line.to_owned();
+    };
     let keywords = match syntax {
         Syntax::Rust => "fn let mut struct enum impl pub use mod match if else for in return Self self true false",
         Syntax::Python => "def class import from as if elif else for while in return True False None and or not",
@@ -1091,7 +1101,10 @@ fn highlight_syntax(line: &str, syntax: Option<Syntax>) -> String {
     let mut index = 0;
     while index < chars.len() {
         let rest: String = chars[index..].iter().collect();
-        if comment_markers.iter().any(|marker| rest.starts_with(marker)) {
+        if comment_markers
+            .iter()
+            .any(|marker| rest.starts_with(marker))
+        {
             result.push_str("\x1b[90m");
             result.extend(chars[index..].iter());
             result.push_str("\x1b[0m");
@@ -1151,12 +1164,19 @@ fn render_cursor_line(line: &str, cursor_col: usize, syntax: Option<Syntax>) -> 
     let end = cursor_col + ch.len_utf8();
     let prefix = &line[..cursor_col];
     let suffix = &line[end..];
-    format!("{}\x1b[7m{}\x1b[0m{}", highlight_syntax(prefix, syntax), ch, highlight_syntax(suffix, syntax))
+    format!(
+        "{}\x1b[7m{}\x1b[0m{}",
+        highlight_syntax(prefix, syntax),
+        ch,
+        highlight_syntax(suffix, syntax)
+    )
 }
 
 fn truncate_message(message: &str, max_len: usize) -> String {
     let mut result = message.chars().take(max_len).collect::<String>();
-    if message.chars().count() > max_len { result.push('…'); }
+    if message.chars().count() > max_len {
+        result.push('…');
+    }
     result
 }
 
@@ -1296,7 +1316,10 @@ mod tests {
     #[test]
     fn pro_env_rejects_disabled_or_unknown_values() {
         for value in ["", "0", "false", "no", "off", "pro"] {
-            assert!(!env_value_is_enabled(value), "{value} should not enable Pro");
+            assert!(
+                !env_value_is_enabled(value),
+                "{value} should not enable Pro"
+            );
         }
     }
 
