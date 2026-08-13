@@ -53,7 +53,42 @@ nix develop --command cargo run -- file.txt
 - `:%s/old/new/g` — заменить во всём файле
 - `:s/old/new/g` — заменить в текущей строке
 - `:set number` / `:set nonumber` — показать / скрыть номера строк
+- `:set altbuffer` / `:set noaltbuffer` — включить / выключить alternative screen buffer
 - `:число` — перейти к строке
 - `:help` — показать справку
 
 В режиме вставки обычный ввод редактирует текущую строку. `Enter` создаёт новую строку.
+
+## MCP server
+
+В проект добавлен stdio MCP-сервер:
+
+```sh
+cargo run --bin rustvim-mcp
+```
+
+Он поддерживает tools:
+
+- `editor_help` — краткая справка по командам RustVim
+- `read_file` — чтение UTF-8 файла по пути
+
+Пример конфигурации MCP-клиента:
+
+```json
+{
+  "mcpServers": {
+    "rustvim": {
+      "command": "cargo",
+      "args": ["run", "--quiet", "--bin", "rustvim-mcp"],
+      "cwd": "/home/occupiednine220/truesandbox"
+    }
+  }
+}
+```
+
+## CI/CD
+
+GitHub Actions workflow находится в `.github/workflows/ci.yml`.
+
+- На `push`, `pull_request` и ручной запуск выполняются `cargo fmt`, `cargo clippy` и `cargo test`.
+- Для тегов вида `v*` собираются release-бинарники `rustvim` и `rustvim-mcp` и публикуются как workflow artifacts.

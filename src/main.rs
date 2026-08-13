@@ -4,6 +4,7 @@ use std::{
     io::{self, Read, Write},
     path::PathBuf,
     process::{Command, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -32,16 +33,31 @@ struct RawTerminal;
 impl RawTerminal {
     fn enter() -> io::Result<Self> {
         run_stty(&["raw", "-echo", "min", "0", "time", "1"])?;
-        print!("\x1b[?25l");
+        print!("\x1b[?1049h\x1b[?25l");
         io::stdout().flush()?;
         Ok(Self)
+    }
+
+    fn suspend_for_child() -> io::Result<()> {
+        run_stty(&["sane"])?;
+        print!("\x1b[?25h\x1b[?1049l\x1b[0m");
+        io::stdout().flush()
+    }
+
+    fn resume_from_child(use_alternate_buffer: bool) -> io::Result<()> {
+        run_stty(&["raw", "-echo", "min", "0", "time", "1"])?;
+        if use_alternate_buffer {
+            print!("\x1b[?1049h");
+        }
+        print!("\x1b[?25l");
+        io::stdout().flush()
     }
 }
 
 impl Drop for RawTerminal {
     fn drop(&mut self) {
         let _ = run_stty(&["sane"]);
-        print!("\x1b[?25h\x1b[0m");
+        print!("\x1b[?25h\x1b[?1049l\x1b[0m");
         let _ = io::stdout().flush();
     }
 }
@@ -62,13 +78,14 @@ struct Editor {
     visual_anchor: usize,
     search: Option<String>,
     show_numbers: bool,
+    use_alternate_buffer: bool,
 }
 
 impl Editor {
     fn open(path: PathBuf) -> io::Result<Self> {
         let lines = match fs::read_to_string(&path) {
             Ok(content) => {
-                let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
+                let mut lines = split_editor_lines(&content);
                 if lines.is_empty() {
                     lines.push(String::new());
                 }
@@ -94,6 +111,7 @@ impl Editor {
             visual_anchor: 0,
             search: None,
             show_numbers: true,
+            use_alternate_buffer: true,
         })
     }
 
@@ -272,12 +290,7 @@ impl Editor {
                 self.message = String::from("Normal mode.");
             }
             Key::Enter => {
-                self.snapshot();
-                let rest = self.lines[self.cursor_line].split_off(self.cursor_col);
-                self.cursor_line += 1;
-                self.lines.insert(self.cursor_line, rest);
-                self.cursor_col = 0;
-                self.dirty = true;
+                self.insert_newline();
             }
             Key::Backspace => self.backspace(),
             Key::ArrowUp => self.move_up(),
@@ -366,6 +379,12 @@ impl Editor {
                 self.show_numbers = false;
                 self.message = String::from("Line numbers disabled.");
             }
+            "set altbuffer" | "set alternative-buffer" => {
+                self.set_alternate_buffer(true)?;
+            }
+            "set noaltbuffer" | "set noalternative-buffer" => {
+                self.set_alternate_buffer(false)?;
+            }
             digits if digits.chars().all(|ch| ch.is_ascii_digit()) && !digits.is_empty() => {
                 let line = digits.parse::<usize>().unwrap_or(1).saturating_sub(1);
                 self.cursor_line = min(line, self.lines.len().saturating_sub(1));
@@ -386,6 +405,27 @@ impl Editor {
             _ => self.message = format!("Unknown command: :{command}"),
         }
         Ok(false)
+    }
+
+    fn set_alternate_buffer(&mut self, enabled: bool) -> io::Result<()> {
+        if self.use_alternate_buffer == enabled {
+            self.message = if enabled {
+                String::from("Alternative buffer is already enabled.")
+            } else {
+                String::from("Alternative buffer is already disabled.")
+            };
+            return Ok(());
+        }
+
+        self.use_alternate_buffer = enabled;
+        if enabled {
+            print!("\x1b[?1049h\x1b[2J\x1b[H");
+            self.message = String::from("Alternative buffer enabled.");
+        } else {
+            print!("\x1b[?1049l");
+            self.message = String::from("Alternative buffer disabled.");
+        }
+        io::stdout().flush()
     }
 
     fn save(&mut self) -> io::Result<()> {
@@ -413,7 +453,7 @@ impl Editor {
             return Ok(());
         }
         let content = fs::read_to_string(&path)?;
-        let mut lines: Vec<String> = content.lines().map(str::to_owned).collect();
+        let mut lines = split_editor_lines(&content);
         if lines.is_empty() {
             lines.push(String::new());
         }
@@ -493,6 +533,16 @@ impl Editor {
         self.snapshot();
         self.lines[self.cursor_line].insert(self.cursor_col, ch);
         self.cursor_col += ch.len_utf8();
+        self.dirty = true;
+    }
+
+    fn insert_newline(&mut self) {
+        self.snapshot();
+        self.clamp_cursor();
+        let rest = self.lines[self.cursor_line].split_off(self.cursor_col);
+        self.cursor_line += 1;
+        self.lines.insert(self.cursor_line, rest);
+        self.cursor_col = 0;
         self.dirty = true;
     }
 
@@ -841,9 +891,7 @@ impl Editor {
     }
 
     fn open_terminal(&mut self, command: Option<&str>) -> io::Result<()> {
-        run_stty(&["sane"])?;
-        print!("\x1b[2J\x1b[H");
-        io::stdout().flush()?;
+        RawTerminal::suspend_for_child()?;
 
         let status = if let Some(command) = command.filter(|command| !command.is_empty()) {
             Command::new("sh")
@@ -862,7 +910,7 @@ impl Editor {
                 .status()
         };
 
-        run_stty(&["raw", "-echo", "min", "0", "time", "1"])?;
+        RawTerminal::resume_from_child(self.use_alternate_buffer)?;
         match status {
             Ok(status) => self.message = format!("Terminal exited with status {status}."),
             Err(error) => self.message = format!("Terminal failed: {error}"),
@@ -888,15 +936,27 @@ impl Editor {
 }
 
 fn read_key() -> io::Result<Key> {
+    static IGNORE_NEXT_LF: AtomicBool = AtomicBool::new(false);
+
     let mut byte = [0_u8; 1];
     loop {
         if io::stdin().read(&mut byte)? == 1 {
+            if byte[0] == 10 && IGNORE_NEXT_LF.swap(false, Ordering::Relaxed) {
+                continue;
+            }
+            if byte[0] != 10 {
+                IGNORE_NEXT_LF.store(false, Ordering::Relaxed);
+            }
             break;
         }
     }
     match byte[0] {
         3 => Ok(Key::CtrlC),
-        13 | 10 => Ok(Key::Enter),
+        13 => {
+            IGNORE_NEXT_LF.store(true, Ordering::Relaxed);
+            Ok(Key::Enter)
+        }
+        10 => Ok(Key::Enter),
         27 => read_escape_sequence(),
         127 | 8 => Ok(Key::Backspace),
         b => Ok(std::str::from_utf8(&[b])
@@ -934,6 +994,17 @@ fn run_stty(args: &[&str]) -> io::Result<()> {
     } else {
         Err(io::Error::new(io::ErrorKind::Other, "stty failed"))
     }
+}
+
+fn split_editor_lines(content: &str) -> Vec<String> {
+    let mut lines: Vec<String> = content
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
+        .collect();
+    if content.ends_with('\n') {
+        let _ = lines.pop();
+    }
+    lines
 }
 
 fn first_non_blank(line: &str) -> usize {
