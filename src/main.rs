@@ -308,32 +308,35 @@ impl Editor {
         let viewport_end = min(self.scroll_line + viewport_rows, self.lines.len());
         for index in self.scroll_line..viewport_end {
             let line = &self.lines[index];
-            let selected = self.mode == Mode::VisualLine && (sel_start..=sel_end).contains(&index);
+            let selected =
+                self.mode == Mode::VisualLine && (sel_start..=sel_end).contains(&index);
             let cursor = index == self.cursor_line;
             let marker = self.line_marker(cursor, selected);
+            let prefix = if self.show_numbers {
+                format!("{marker} {:>width$} | ", index + 1, width = number_width)
+            } else {
+                format!("{marker} ")
+            };
+            let available_cols = render_cols.saturating_sub(visible_width(&prefix));
             let rendered_line = if cursor {
-                render_cursor_line(
+                render_cursor_line_window(
                     line,
                     self.cursor_col,
                     syntax_for_path(&self.path).filter(|_| self.syntax_active()),
                     self.theme,
+                    available_cols,
                 )
             } else if self.syntax_active() {
                 highlight_syntax(line, syntax_for_path(&self.path), self.theme)
             } else {
                 line.to_owned()
             };
-            if self.show_numbers {
-                let prefix = format!("{marker} {:>width$} | ", index + 1, width = number_width);
-                let available_cols = render_cols.saturating_sub(visible_width(&prefix));
-                let rendered_line = truncate_terminal_line(&rendered_line, available_cols);
-                print!("{}{prefix}{rendered_line}\r\n", self.theme.screen());
+            let rendered_line = if cursor {
+                rendered_line
             } else {
-                let prefix = format!("{marker} ");
-                let available_cols = render_cols.saturating_sub(visible_width(&prefix));
-                let rendered_line = truncate_terminal_line(&rendered_line, available_cols);
-                print!("{}{prefix}{rendered_line}\r\n", self.theme.screen());
-            }
+                truncate_terminal_line(&rendered_line, available_cols)
+            };
+            print!("{}{prefix}{rendered_line}\r\n", self.theme.screen());
         }
         for _ in viewport_end.saturating_sub(self.scroll_line)..viewport_rows {
             print!(
@@ -417,7 +420,7 @@ impl Editor {
 
     fn handle_key(&mut self, key: Key) -> io::Result<bool> {
         self.key_presses = self.key_presses.saturating_add(1);
-        if self.key_presses.is_multiple_of(50) {
+        if !self.pro_active && self.key_presses.is_multiple_of(50) {
             self.ad_message = Some(String::from(
                 "RustVim Pro: redo, плагины, темы и окна — попробуйте Pro",
             ));
@@ -2396,6 +2399,66 @@ fn render_cursor_line(
     )
 }
 
+fn render_cursor_line_window(
+    line: &str,
+    cursor_col: usize,
+    syntax: Option<Syntax>,
+    theme: Theme,
+    max_width: usize,
+) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+    if visible_width(line) <= max_width {
+        return render_cursor_line(line, cursor_col, syntax, theme);
+    }
+
+    let chars = line.char_indices().collect::<Vec<_>>();
+    let cursor_index = chars
+        .iter()
+        .position(|(index, _)| *index >= cursor_col)
+        .unwrap_or(chars.len());
+    let cursor_index = min(cursor_index, chars.len());
+    let left_ellipsis = cursor_index > 0;
+    let right_ellipsis = cursor_index < chars.len();
+    let cursor_cell = usize::from(cursor_index == chars.len());
+    let content_width = max_width
+        .saturating_sub(usize::from(left_ellipsis))
+        .saturating_sub(usize::from(right_ellipsis))
+        .saturating_sub(cursor_cell);
+    let cursor_in_content = if cursor_cell == 0 {
+        min(cursor_index, content_width.saturating_sub(1))
+    } else {
+        min(cursor_index, content_width)
+    };
+    let mut start = cursor_index.saturating_sub(cursor_in_content);
+    if start + content_width > chars.len() {
+        start = chars.len().saturating_sub(content_width);
+    }
+    let end = min(start + content_width, chars.len());
+    let start_byte = chars
+        .get(start)
+        .map(|(index, _)| *index)
+        .unwrap_or(line.len());
+    let end_byte = chars.get(end).map(|(index, _)| *index).unwrap_or(line.len());
+    let window = &line[start_byte..end_byte];
+    let local_cursor = if cursor_index <= start {
+        0
+    } else if cursor_index >= end {
+        window.len()
+    } else {
+        chars[cursor_index].0 - start_byte
+    };
+    let mut rendered = render_cursor_line(window, local_cursor, syntax, theme);
+    if left_ellipsis {
+        rendered.insert(0, '…');
+    }
+    if right_ellipsis {
+        rendered.push('…');
+    }
+    rendered
+}
+
 fn truncate_message(message: &str, max_len: usize) -> String {
     let mut result = message.chars().take(max_len).collect::<String>();
     if message.chars().count() > max_len {
@@ -2784,8 +2847,8 @@ mod tests {
     use super::{
         autocorrect_text, ceil_char_boundary, effective_render_dimensions, env_value_is_enabled,
         floor_char_boundary, highlight_syntax, parse_command_words, render_markdown,
-        serialize_editor_lines, split_editor_lines, strip_code_fence, syntax_for_path,
-        truncate_terminal_line, visible_width, PathBuf, Syntax, Theme,
+        render_cursor_line_window, serialize_editor_lines, split_editor_lines, strip_code_fence,
+        syntax_for_path, truncate_terminal_line, visible_width, PathBuf, Syntax, Theme,
     };
     use std::collections::BTreeMap;
 
@@ -2843,6 +2906,24 @@ mod tests {
         let rendered = truncate_terminal_line("\x1b[31mabcdef\x1b[0m", 4);
         assert_eq!(visible_width(&rendered), 4);
         assert!(rendered.contains("abc…"));
+    }
+
+    #[test]
+    fn cursor_window_keeps_cursor_visible_on_long_lines() {
+        let rendered = render_cursor_line_window("abcdefghij", 7, None, Theme::White, 5);
+        assert_eq!(visible_width(&rendered), 5);
+        assert!(rendered.contains("h"));
+        assert!(rendered.starts_with('…'));
+        assert!(rendered.ends_with('…'));
+    }
+
+    #[test]
+    fn cursor_window_handles_utf8_and_end_of_line() {
+        let line = "привет-мир";
+        let rendered = render_cursor_line_window(line, line.len(), None, Theme::White, 6);
+        assert_eq!(visible_width(&rendered), 6);
+        assert!(rendered.contains(" "));
+        assert!(rendered.starts_with('…'));
     }
 
     #[test]
