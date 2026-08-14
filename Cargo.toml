@@ -5,6 +5,13 @@ edition = "2021"
 description = "A small from-scratch modal terminal editor prototype"
 license = "MIT"
 
+[dependencies]
+async-openai = { version = "0.41.3", features = ["responses"] }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+toml = "0.9"
+
 [[bin]]
 name = "rustvim"
 path = "src/main.rs"

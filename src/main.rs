@@ -1,3 +1,7 @@
+mod ai;
+mod config;
+mod terminal_graphics;
+
 use std::{
     cmp::{max, min},
     env, fs,
@@ -7,8 +11,12 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use ai::AiClient;
+use config::{AppConfig, McpServerConfig, Theme};
+use terminal_graphics::{is_image_path, render_image};
+
 const PRO_ENV_VAR: &str = "RUSTVIM_PRO";
-const AI_COMMAND_ENV_VAR: &str = "RUSTVIM_AI_COMMAND";
+const SUBSCRIPTION_PROMPT: &str = "Оформите подписку RustVim Pro для AI и премиум-функций.";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -16,6 +24,10 @@ enum Mode {
     Insert,
     VisualLine,
     Command,
+    Files,
+    Image,
+    MarkdownPreview,
+    Welcome,
 }
 
 enum Key {
@@ -23,6 +35,7 @@ enum Key {
     Enter,
     Esc,
     Backspace,
+    Tab,
     ArrowUp,
     ArrowDown,
     ArrowLeft,
@@ -31,12 +44,22 @@ enum Key {
     Unknown,
 }
 
+#[derive(Clone, Copy)]
+enum AiAction {
+    Show,
+    Insert,
+    Replace,
+}
+
 struct RawTerminal;
 
 impl RawTerminal {
-    fn enter() -> io::Result<Self> {
+    fn enter(use_alternate_buffer: bool) -> io::Result<Self> {
         run_stty(&["raw", "-echo", "min", "0", "time", "1"])?;
-        print!("\x1b[?1049h\x1b[?25l");
+        if use_alternate_buffer {
+            print!("\x1b[?1049h");
+        }
+        print!("\x1b[?25l");
         io::stdout().flush()?;
         Ok(Self)
     }
@@ -84,6 +107,15 @@ struct Editor {
     use_alternate_buffer: bool,
     pro_active: bool,
     syntax_enabled: bool,
+    scroll_line: usize,
+    browser_dir: PathBuf,
+    browser_entries: Vec<PathBuf>,
+    browser_selected: usize,
+    image_path: Option<PathBuf>,
+    config: AppConfig,
+    config_path: PathBuf,
+    theme: Theme,
+    autocorrect_enabled: bool,
 }
 
 impl Editor {
@@ -91,7 +123,20 @@ impl Editor {
         Self::open_with_pro(path, pro_active_from_env())
     }
 
+    fn open_welcome() -> io::Result<Self> {
+        let mut editor = Self::open_with_pro(PathBuf::from("untitled.txt"), pro_active_from_env())?;
+        editor.mode = Mode::Welcome;
+        editor.message = if editor.pro_active {
+            String::from("RustVim Pro active. Enter: start an empty file. :help: Vim guide.")
+        } else {
+            String::from("Оформите RustVim Pro, чтобы открыть AI и премиум-функции.")
+        };
+        Ok(editor)
+    }
+
     fn open_with_pro(path: PathBuf, pro_active: bool) -> io::Result<Self> {
+        let config_path = config::config_path();
+        let config = config::load(&config_path)?;
         let lines = match fs::read_to_string(&path) {
             Ok(content) => {
                 let mut lines = split_editor_lines(&content);
@@ -103,6 +148,25 @@ impl Editor {
             Err(error) if error.kind() == io::ErrorKind::NotFound => vec![String::new()],
             Err(error) => return Err(error),
         };
+
+        let browser_dir = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+
+        let (show_numbers, syntax_enabled, use_alternate_buffer, theme, autocorrect_enabled) =
+            if pro_active {
+                (
+                    config.editor.line_numbers,
+                    config.editor.syntax_highlighting,
+                    config.editor.alternate_buffer,
+                    config.customization.theme,
+                    config.autocorrect.enabled,
+                )
+            } else {
+                (true, false, true, Theme::White, false)
+            };
 
         Ok(Self {
             path,
@@ -119,32 +183,61 @@ impl Editor {
             pending: None,
             visual_anchor: 0,
             search: None,
-            show_numbers: true,
-            use_alternate_buffer: true,
+            show_numbers,
+            use_alternate_buffer,
             pro_active,
-            syntax_enabled: pro_active,
+            syntax_enabled,
+            scroll_line: 0,
+            browser_dir,
+            browser_entries: Vec::new(),
+            browser_selected: 0,
+            image_path: None,
+            config,
+            config_path,
+            theme,
+            autocorrect_enabled,
         })
     }
 
-    fn render(&self) -> io::Result<()> {
-        print!("\x1b[2J\x1b[H");
+    fn render(&mut self) -> io::Result<()> {
+        print!("\x1b[2J\x1b[H{}", self.theme.screen());
+        let (terminal_rows, terminal_cols) = terminal_size();
+        if self.mode == Mode::Files {
+            return self.render_file_manager(terminal_rows, terminal_cols);
+        }
+        if self.mode == Mode::Image {
+            return self.render_image_preview(terminal_rows, terminal_cols);
+        }
+        if self.mode == Mode::MarkdownPreview {
+            return self.render_markdown_preview(terminal_rows, terminal_cols);
+        }
+        if self.mode == Mode::Welcome {
+            return self.render_welcome(terminal_rows, terminal_cols);
+        }
+        let reserved_rows = if self.pro_active { 4 } else { 5 };
+        let viewport_rows = terminal_rows.saturating_sub(reserved_rows).max(1);
+        self.ensure_cursor_visible(viewport_rows);
         let (sel_start, sel_end) = self.selection_bounds();
         let number_width = max(4, self.lines.len().to_string().len());
-        for (index, line) in self.lines.iter().enumerate() {
+        let viewport_end = min(self.scroll_line + viewport_rows, self.lines.len());
+        for index in self.scroll_line..viewport_end {
+            let line = &self.lines[index];
             let selected = self.mode == Mode::VisualLine && (sel_start..=sel_end).contains(&index);
             let cursor = index == self.cursor_line;
-            let marker = line_marker(cursor, selected);
+            let marker = self.line_marker(cursor, selected);
             let rendered_line = if cursor {
                 render_cursor_line(
                     line,
                     self.cursor_col,
                     syntax_for_path(&self.path).filter(|_| self.syntax_active()),
+                    self.theme,
                 )
             } else if self.syntax_active() {
-                highlight_syntax(line, syntax_for_path(&self.path))
+                highlight_syntax(line, syntax_for_path(&self.path), self.theme)
             } else {
                 line.to_owned()
             };
+            let rendered_line = truncate_terminal_line(&rendered_line, terminal_cols);
             if self.show_numbers {
                 print!(
                     "{marker} {:>width$} | {rendered_line}\r\n",
@@ -155,22 +248,33 @@ impl Editor {
                 print!("{marker} {rendered_line}\r\n");
             }
         }
-        print!("~\r\n");
-        print!("~\r\n");
+        for _ in viewport_end.saturating_sub(self.scroll_line)..viewport_rows {
+            print!("{}\r\n", self.empty_line_marker());
+        }
+        if !self.pro_active {
+            print!("\x1b[33m{SUBSCRIPTION_PROMPT}\x1b[0m\r\n");
+        }
 
         let mode = match self.mode {
             Mode::Normal => "NORMAL",
             Mode::Insert => "INSERT",
             Mode::VisualLine => "VISUAL LINE",
             Mode::Command => "COMMAND",
+            Mode::Files => "FILES",
+            Mode::Image => "IMAGE",
+            Mode::MarkdownPreview => "MARKDOWN PREVIEW",
+            Mode::Welcome => "WELCOME",
         };
         print!(
-            "\x1b[7m {}{}  {}  line {}, col {} \x1b[0m\r\n",
+            "{} {}{}  {}  line {}, col {}  theme:{} {}\r\n",
+            self.theme.status(),
             self.path.display(),
             if self.dirty { " [+]" } else { "" },
             mode,
             self.cursor_line + 1,
-            self.cursor_col + 1
+            self.cursor_col + 1,
+            self.theme.name(),
+            self.theme.screen(),
         );
         if self.mode == Mode::Command {
             print!("{}{}", self.command_prompt, self.command);
@@ -178,6 +282,18 @@ impl Editor {
             print!("{}", self.message);
         }
         io::stdout().flush()
+    }
+
+    fn ensure_cursor_visible(&mut self, viewport_rows: usize) {
+        if self.cursor_line < self.scroll_line {
+            self.scroll_line = self.cursor_line;
+        } else if self.cursor_line >= self.scroll_line + viewport_rows {
+            self.scroll_line = self.cursor_line + 1 - viewport_rows;
+        }
+        self.scroll_line = min(
+            self.scroll_line,
+            self.lines.len().saturating_sub(viewport_rows),
+        );
     }
 
     fn handle_key(&mut self, key: Key) -> io::Result<bool> {
@@ -192,7 +308,41 @@ impl Editor {
                 Ok(false)
             }
             Mode::Command => self.handle_command(key),
+            Mode::Files => self.handle_files(key),
+            Mode::Image => {
+                self.handle_image(key);
+                Ok(false)
+            }
+            Mode::MarkdownPreview => {
+                self.handle_markdown_preview(key);
+                Ok(false)
+            }
+            Mode::Welcome => self.handle_welcome(key),
         }
+    }
+
+    fn handle_welcome(&mut self, key: Key) -> io::Result<bool> {
+        match key {
+            Key::Enter | Key::Char('i') => {
+                self.lines = vec![String::new()];
+                self.cursor_line = 0;
+                self.cursor_col = 0;
+                self.mode = Mode::Normal;
+                self.message = if self.pro_active {
+                    String::from("Empty buffer. Press i to insert; :help for the Vim guide.")
+                } else {
+                    String::from("Оформите RustVim Pro для AI и премиум-функций.")
+                };
+            }
+            Key::Char('q') | Key::CtrlC => return Ok(true),
+            Key::Char(':') => {
+                self.command.clear();
+                self.command_prompt = ':';
+                self.mode = Mode::Command;
+            }
+            _ => {}
+        }
+        Ok(false)
     }
 
     fn handle_normal(&mut self, key: Key) -> io::Result<bool> {
@@ -318,6 +468,7 @@ impl Editor {
                 self.insert_newline();
             }
             Key::Backspace => self.backspace(),
+            Key::Tab => self.ai_complete(),
             Key::ArrowUp => self.move_up(),
             Key::ArrowDown => self.move_down(),
             Key::ArrowLeft => self.move_left(),
@@ -394,37 +545,137 @@ impl Editor {
             "term" => {
                 self.open_terminal(None)?;
             }
+            "files" | "explore" => self.open_file_manager(None)?,
+            "image" => {
+                if is_image_path(&self.path) {
+                    self.image_path = Some(self.path.clone());
+                    self.mode = Mode::Image;
+                } else {
+                    self.message = String::from("Current file is not a supported image.");
+                }
+            }
+            "preview" | "markdown" | "md-preview" => self.open_markdown_preview(),
+            "autocorrect" => self.autocorrect_document(),
+            "set autocorrect" => self.set_autocorrect(true)?,
+            "set noautocorrect" => self.set_autocorrect(false)?,
+            "theme" => {
+                self.message = format!(
+                    "Theme: {}. Available with Pro: white, tokyo-night, gruvbox, catppuccin.",
+                    self.theme.name()
+                );
+            }
+            "config path" => {
+                self.message = format!("Config: {}", self.config_path.display());
+            }
+            "config reload" => self.reload_config()?,
+            "mcp" | "mcp list" => self.list_mcp_servers(),
             "help" => {
                 self.message = String::from(
-                    "i/a/I/A/o/O | arrows | hjkl Pro | V y d | dd yy cc p x r D C J u w b e n N >> << | / :s :set :e :w :q :ai",
+                    "i/a/I/A/o/O | arrows | hjkl Pro | V y d | edits | / :s :set :theme :preview :autocorrect :mcp :config :ai :agent",
                 );
             }
             "set syntax" if self.pro_active => {
                 self.syntax_enabled = true;
+                self.config.editor.syntax_highlighting = true;
+                self.save_config()?;
                 self.message = String::from("Syntax highlighting enabled.");
             }
-            "set nosyntax" => {
+            "set syntax" => self.show_subscription_prompt(),
+            "set nosyntax" if self.pro_active => {
                 self.syntax_enabled = false;
+                self.config.editor.syntax_highlighting = false;
+                self.save_config()?;
                 self.message = String::from("Syntax highlighting disabled.");
             }
+            "set nosyntax" => self.show_subscription_prompt(),
             other if other == "ai" || other.starts_with("ai ") => {
-                self.run_ai(other.strip_prefix("ai ").unwrap_or("Summarize this file"))?;
+                self.run_ai(
+                    "Answer the user's question about the current file concisely.",
+                    other.strip_prefix("ai ").unwrap_or("Summarize this file"),
+                    AiAction::Show,
+                );
             }
-            "ai-summary" => self.run_ai("Summarize this file")?,
-            "set number" | "set nu" => {
+            "ai-summary" => self.run_ai(
+                "Summarize the current file, its purpose, structure, and important risks.",
+                "Summarize this file.",
+                AiAction::Show,
+            ),
+            "ai-explain" => self.run_ai(
+                "Explain the current file clearly for a developer who is new to the codebase.",
+                "Explain this file.",
+                AiAction::Show,
+            ),
+            "ai-review" => self.run_ai(
+                "Review the current file. Focus on correctness, security, performance, and maintainability. Return actionable findings.",
+                "Review this file.",
+                AiAction::Show,
+            ),
+            "ai-docs" => self.run_ai(
+                "Generate concise developer documentation for the current file. Return documentation text only.",
+                "Document the public behavior, configuration, and important implementation details.",
+                AiAction::Show,
+            ),
+            "ai-optimize" => self.run_ai(
+                "Optimize the current file while preserving behavior. Return the complete updated file only, without Markdown fences or explanation.",
+                "Improve performance and remove unnecessary work without making the code harder to maintain.",
+                AiAction::Replace,
+            ),
+            "ai-fix" => self.run_ai(
+                "Fix bugs and obvious quality problems in the current file. Return the complete updated file only, without Markdown fences or explanation.",
+                "Fix this file while preserving its intended behavior.",
+                AiAction::Replace,
+            ),
+            other if other == "ai-refactor" || other.starts_with("ai-refactor ") => self.run_ai(
+                "Refactor the current file according to the request. Return the complete updated file only, without Markdown fences or explanation.",
+                other.strip_prefix("ai-refactor ").unwrap_or("Improve readability and maintainability."),
+                AiAction::Replace,
+            ),
+            other if other == "ai-tests" || other.starts_with("ai-tests ") => self.run_ai(
+                "Generate focused tests for the current file and request. Return code only, without Markdown fences or explanation.",
+                other.strip_prefix("ai-tests ").unwrap_or("Generate useful tests."),
+                AiAction::Insert,
+            ),
+            other if other.starts_with("ai-translate ") => self.run_ai(
+                "Translate user-facing text and comments in the current file as requested. Preserve code behavior and return the complete updated file only, without Markdown fences or explanation.",
+                other.strip_prefix("ai-translate ").unwrap_or_default(),
+                AiAction::Replace,
+            ),
+            other if other == "ai-generate" || other.starts_with("ai-generate ") => self.run_ai(
+                "Generate code requested by the user that fits the current file and surrounding style. Return code only, without Markdown fences or explanation.",
+                other.strip_prefix("ai-generate ").unwrap_or("Generate a useful implementation for the current context."),
+                AiAction::Insert,
+            ),
+            other if other == "agent" || other.starts_with("agent ") => self.run_ai(
+                "Act as an autonomous coding agent. Complete the requested task in the current file, verify consistency mentally, and return the complete updated file only without Markdown fences or explanation.",
+                other.strip_prefix("agent ").unwrap_or("Improve this file."),
+                AiAction::Replace,
+            ),
+            "set number" | "set nu" if self.pro_active => {
                 self.show_numbers = true;
+                self.config.editor.line_numbers = true;
+                self.save_config()?;
                 self.message = String::from("Line numbers enabled.");
             }
-            "set nonumber" | "set nonu" => {
+            "set number" | "set nu" => self.show_subscription_prompt(),
+            "set nonumber" | "set nonu" if self.pro_active => {
                 self.show_numbers = false;
+                self.config.editor.line_numbers = false;
+                self.save_config()?;
                 self.message = String::from("Line numbers disabled.");
             }
-            "set altbuffer" | "set alternative-buffer" => {
+            "set nonumber" | "set nonu" => self.show_subscription_prompt(),
+            "set altbuffer" | "set alternative-buffer" if self.pro_active => {
                 self.set_alternate_buffer(true)?;
+                self.config.editor.alternate_buffer = true;
+                self.save_config()?;
             }
-            "set noaltbuffer" | "set noalternative-buffer" => {
+            "set altbuffer" | "set alternative-buffer" => self.show_subscription_prompt(),
+            "set noaltbuffer" | "set noalternative-buffer" if self.pro_active => {
                 self.set_alternate_buffer(false)?;
+                self.config.editor.alternate_buffer = false;
+                self.save_config()?;
             }
+            "set noaltbuffer" | "set noalternative-buffer" => self.show_subscription_prompt(),
             digits if digits.chars().all(|ch| ch.is_ascii_digit()) && !digits.is_empty() => {
                 let line = digits.parse::<usize>().unwrap_or(1).saturating_sub(1);
                 self.cursor_line = min(line, self.lines.len().saturating_sub(1));
@@ -441,10 +692,315 @@ impl Editor {
             other if other.starts_with("term ") => {
                 self.open_terminal(Some(other[5..].trim()))?;
             }
+            other if other.starts_with("files ") || other.starts_with("explore ") => {
+                let path = other.split_once(' ').map(|(_, path)| path.trim()).unwrap_or(".");
+                self.open_file_manager(Some(PathBuf::from(path)))?;
+            }
+            other if other.starts_with("image ") => {
+                let path = PathBuf::from(other[6..].trim());
+                if path.is_file() && is_image_path(&path) {
+                    self.image_path = Some(path);
+                    self.mode = Mode::Image;
+                } else {
+                    self.message = String::from("Image file not found or unsupported.");
+                }
+            }
+            other if other.starts_with("theme ") => self.set_theme(&other[6..])?,
+            other if other.starts_with("mcp add ") => self.add_mcp_server(&other[8..])?,
+            other if other.starts_with("mcp remove ") => self.remove_mcp_server(&other[11..])?,
+            other if other.starts_with("mcp enable ") => {
+                self.set_mcp_server_enabled(&other[11..], true)?
+            }
+            other if other.starts_with("mcp disable ") => {
+                self.set_mcp_server_enabled(&other[12..], false)?
+            }
             other if other.starts_with("%s/") || other.starts_with("s/") => self.substitute(other),
             _ => self.message = format!("Unknown command: :{command}"),
         }
         Ok(false)
+    }
+
+    fn save_config(&self) -> io::Result<()> {
+        config::save(&self.config_path, &self.config)
+    }
+
+    fn reload_config(&mut self) -> io::Result<()> {
+        if !self.pro_active {
+            self.show_subscription_prompt();
+            return Ok(());
+        }
+        self.config = config::load(&self.config_path)?;
+        self.show_numbers = self.config.editor.line_numbers;
+        self.syntax_enabled = self.config.editor.syntax_highlighting;
+        self.autocorrect_enabled = self.config.autocorrect.enabled;
+        self.theme = self.config.customization.theme;
+        let alternate_buffer = self.config.editor.alternate_buffer;
+        self.set_alternate_buffer(alternate_buffer)?;
+        self.message = format!("Reloaded config: {}", self.config_path.display());
+        Ok(())
+    }
+
+    fn set_theme(&mut self, name: &str) -> io::Result<()> {
+        if !self.pro_active {
+            self.show_subscription_prompt();
+            return Ok(());
+        }
+        let Some(theme) = Theme::parse(name) else {
+            self.message =
+                String::from("Unknown theme. Use white, tokyo-night, gruvbox, or catppuccin.");
+            return Ok(());
+        };
+        self.theme = theme;
+        self.config.customization.theme = theme;
+        self.save_config()?;
+        self.message = format!("Theme changed to {}.", theme.name());
+        Ok(())
+    }
+
+    fn set_autocorrect(&mut self, enabled: bool) -> io::Result<()> {
+        if !self.pro_active {
+            self.show_subscription_prompt();
+            return Ok(());
+        }
+        self.autocorrect_enabled = enabled;
+        self.config.autocorrect.enabled = enabled;
+        self.save_config()?;
+        self.message = if enabled {
+            String::from("Autocorrect enabled.")
+        } else {
+            String::from("Autocorrect disabled.")
+        };
+        Ok(())
+    }
+
+    fn autocorrect_document(&mut self) {
+        if !self.pro_active {
+            self.show_subscription_prompt();
+            return;
+        }
+        self.snapshot();
+        let mut changes = 0;
+        for line in &mut self.lines {
+            let (corrected, line_changes) =
+                autocorrect_text(line, &self.config.autocorrect.replacements);
+            if line_changes > 0 {
+                *line = corrected;
+                changes += line_changes;
+            }
+        }
+        if changes == 0 {
+            let _ = self.undo.pop();
+            self.message = String::from("Autocorrect found no replacements.");
+        } else {
+            self.dirty = true;
+            self.clamp_cursor();
+            self.message = format!("Autocorrect applied {changes} replacement(s).");
+        }
+    }
+
+    fn autocorrect_word_before_cursor(&mut self) {
+        let line = &mut self.lines[self.cursor_line];
+        let before = &line[..self.cursor_col];
+        let start = before
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| !is_word_char(*ch))
+            .map(|(index, ch)| index + ch.len_utf8())
+            .unwrap_or(0);
+        let word = &line[start..self.cursor_col];
+        let Some(replacement) = self.config.autocorrect.replacements.get(word) else {
+            return;
+        };
+        let replacement = replacement.clone();
+        line.replace_range(start..self.cursor_col, &replacement);
+        self.cursor_col = start + replacement.len();
+    }
+
+    fn open_markdown_preview(&mut self) {
+        if !self.pro_active {
+            self.show_subscription_prompt();
+        } else if !matches!(syntax_for_path(&self.path), Some(Syntax::Markdown)) {
+            self.message = String::from("Markdown preview requires a .md or .markdown file.");
+        } else {
+            self.mode = Mode::MarkdownPreview;
+        }
+    }
+
+    fn render_markdown_preview(&self, rows: usize, cols: usize) -> io::Result<()> {
+        let width = min(
+            cols.saturating_sub(2).max(20),
+            self.config.editor.markdown_preview_width.max(20),
+        );
+        let rendered = render_markdown(&self.lines, width);
+        println!(
+            "{} MARKDOWN PREVIEW  {} {}\r",
+            self.theme.status(),
+            self.path.display(),
+            self.theme.screen()
+        );
+        for line in rendered.into_iter().take(rows.saturating_sub(3)) {
+            println!("{}\r", truncate_terminal_line(&line, cols));
+        }
+        print!("Esc: editor  r: refresh");
+        io::stdout().flush()
+    }
+
+    fn render_welcome(&self, rows: usize, cols: usize) -> io::Result<()> {
+        let content_width = cols.saturating_sub(4).max(24);
+        let mut content = vec![
+            String::from("RustVim"),
+            String::from("Vim guide / стартовый экран"),
+            String::new(),
+        ];
+        if self.pro_active {
+            content.push(String::from("RustVim Pro активен."));
+        } else {
+            content.push(String::from(
+                "Оформите подписку RustVim Pro для AI и премиум-функций.",
+            ));
+            content.push(String::from(
+                "Без подписки доступен только стандартный белый интерфейс.",
+            ));
+        }
+        content.extend([
+            String::new(),
+            String::from("Быстрый гайд по Vim:"),
+            String::from("  i / a       начать ввод до / после курсора"),
+            String::from("  Esc         вернуться в normal mode"),
+            String::from("  h j k l     перемещение (hjkl доступно в Pro)"),
+            String::from("  w / b       следующее / предыдущее слово"),
+            String::from("  dd / yy     удалить / скопировать строку"),
+            String::from("  p / P        вставить после / перед курсором"),
+            String::from("  u            отменить последнее изменение"),
+            String::from("  /текст       поиск по файлу"),
+            String::from("  :w           сохранить файл"),
+            String::from("  :q           выйти (доступно в Pro)"),
+            String::new(),
+            String::from("Enter или i — открыть пустой буфер; :help — справка; q — выход"),
+        ]);
+        println!(
+            "{} RustVim — Welcome {}",
+            self.theme.status(),
+            self.theme.screen()
+        );
+        for line in content.into_iter().take(rows.saturating_sub(3)) {
+            println!("  {}\r", truncate_terminal_line(&line, content_width));
+        }
+        print!("{}", self.message);
+        io::stdout().flush()
+    }
+
+    fn handle_markdown_preview(&mut self, key: Key) {
+        if matches!(key, Key::Esc | Key::Backspace | Key::Char('q')) {
+            self.mode = Mode::Normal;
+            self.message = String::from("Markdown preview closed.");
+        }
+    }
+
+    fn list_mcp_servers(&mut self) {
+        if !self.pro_active {
+            self.show_subscription_prompt();
+            return;
+        }
+        if self.config.mcp_servers.is_empty() {
+            self.message = String::from("No MCP servers. Use :mcp add <name> <command> [args...].");
+            return;
+        }
+        self.message = format!(
+            "MCP: {}",
+            self.config
+                .mcp_servers
+                .iter()
+                .map(|(name, server)| format!(
+                    "{}{}",
+                    name,
+                    if server.enabled { "" } else { " (disabled)" }
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    fn add_mcp_server(&mut self, spec: &str) -> io::Result<()> {
+        if !self.pro_active {
+            self.show_subscription_prompt();
+            return Ok(());
+        }
+        let parts = parse_command_words(spec);
+        if parts.len() < 2 {
+            self.message = String::from("Usage: :mcp add <name> <command> [args...]");
+            return Ok(());
+        }
+        let name = parts[0].clone();
+        self.config.mcp_servers.insert(
+            name.clone(),
+            McpServerConfig {
+                command: parts[1].clone(),
+                args: parts[2..].to_vec(),
+                cwd: None,
+                enabled: true,
+            },
+        );
+        self.save_config()?;
+        self.message = format!(
+            "MCP server '{name}' added to {}.",
+            self.config_path.display()
+        );
+        Ok(())
+    }
+
+    fn remove_mcp_server(&mut self, name: &str) -> io::Result<()> {
+        if !self.pro_active {
+            self.show_subscription_prompt();
+            return Ok(());
+        }
+        let name = name.trim();
+        if self.config.mcp_servers.remove(name).is_some() {
+            self.save_config()?;
+            self.message = format!("MCP server '{name}' removed.");
+        } else {
+            self.message = format!("MCP server '{name}' not found.");
+        }
+        Ok(())
+    }
+
+    fn set_mcp_server_enabled(&mut self, name: &str, enabled: bool) -> io::Result<()> {
+        if !self.pro_active {
+            self.show_subscription_prompt();
+            return Ok(());
+        }
+        let name = name.trim();
+        let Some(server) = self.config.mcp_servers.get_mut(name) else {
+            self.message = format!("MCP server '{name}' not found.");
+            return Ok(());
+        };
+        server.enabled = enabled;
+        self.save_config()?;
+        self.message = format!(
+            "MCP server '{name}' {}.",
+            if enabled { "enabled" } else { "disabled" }
+        );
+        Ok(())
+    }
+
+    fn empty_line_marker(&self) -> &str {
+        if self.pro_active {
+            &self.config.customization.empty_line_marker
+        } else {
+            "~"
+        }
+    }
+
+    fn line_marker(&self, cursor: bool, selected: bool) -> String {
+        if !self.pro_active {
+            return line_marker(cursor, selected).to_owned();
+        }
+        match (cursor, selected) {
+            (true, true) => format!("{}*", self.config.customization.cursor_marker.trim_end()),
+            (true, false) => self.config.customization.cursor_marker.clone(),
+            (false, true) => self.config.customization.selected_marker.clone(),
+            (false, false) => String::from("  "),
+        }
     }
 
     fn set_alternate_buffer(&mut self, enabled: bool) -> io::Result<()> {
@@ -502,6 +1058,7 @@ impl Editor {
         self.lines = lines;
         self.cursor_line = 0;
         self.cursor_col = 0;
+        self.scroll_line = 0;
         self.dirty = false;
         self.message = String::from("File loaded.");
         Ok(())
@@ -573,6 +1130,9 @@ impl Editor {
 
     fn insert_char(&mut self, ch: char) {
         self.snapshot();
+        if self.autocorrect_enabled && (ch.is_whitespace() || is_autocorrect_separator(ch)) {
+            self.autocorrect_word_before_cursor();
+        }
         self.lines[self.cursor_line].insert(self.cursor_col, ch);
         self.cursor_col += ch.len_utf8();
         self.dirty = true;
@@ -963,6 +1523,146 @@ impl Editor {
         Ok(())
     }
 
+    fn open_file_manager(&mut self, path: Option<PathBuf>) -> io::Result<()> {
+        if let Some(path) = path {
+            self.browser_dir = if path.is_dir() {
+                path
+            } else {
+                path.parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf()
+            };
+        }
+        self.refresh_file_manager()?;
+        self.mode = Mode::Files;
+        self.message = String::from("File manager: arrows/j/k, Enter, Backspace, Esc.");
+        Ok(())
+    }
+
+    fn refresh_file_manager(&mut self) -> io::Result<()> {
+        let mut entries = fs::read_dir(&self.browser_dir)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| {
+            right
+                .is_dir()
+                .cmp(&left.is_dir())
+                .then_with(|| left.file_name().cmp(&right.file_name()))
+        });
+        self.browser_entries = entries;
+        self.browser_selected = min(
+            self.browser_selected,
+            self.browser_entries.len().saturating_sub(1),
+        );
+        Ok(())
+    }
+
+    fn render_file_manager(&self, rows: usize, cols: usize) -> io::Result<()> {
+        println!("\x1b[7m FILES  {} \x1b[0m\r", self.browser_dir.display());
+        let viewport_rows = rows.saturating_sub(3).max(1);
+        let start = self
+            .browser_selected
+            .saturating_sub(viewport_rows.saturating_sub(1));
+        let end = min(start + viewport_rows, self.browser_entries.len());
+        for index in start..end {
+            let path = &self.browser_entries[index];
+            let marker = if index == self.browser_selected {
+                ">"
+            } else {
+                " "
+            };
+            let kind = if path.is_dir() {
+                "📁"
+            } else if is_image_path(path) {
+                "🖼"
+            } else {
+                " "
+            };
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            println!(
+                "{} {} {}\r",
+                marker,
+                kind,
+                truncate_terminal_line(&name, cols.saturating_sub(4))
+            );
+        }
+        for _ in end.saturating_sub(start)..viewport_rows {
+            println!("~\r");
+        }
+        print!("Enter: open  Backspace: parent  r: refresh  Esc: editor");
+        io::stdout().flush()
+    }
+
+    fn handle_files(&mut self, key: Key) -> io::Result<bool> {
+        match key {
+            Key::Esc => self.mode = Mode::Normal,
+            Key::ArrowUp | Key::Char('k') => {
+                self.browser_selected = self.browser_selected.saturating_sub(1)
+            }
+            Key::ArrowDown | Key::Char('j') => {
+                self.browser_selected = min(
+                    self.browser_selected + 1,
+                    self.browser_entries.len().saturating_sub(1),
+                )
+            }
+            Key::Backspace | Key::Char('h') => {
+                if let Some(parent) = self.browser_dir.parent() {
+                    self.browser_dir = parent.to_path_buf();
+                    self.browser_selected = 0;
+                    self.refresh_file_manager()?;
+                }
+            }
+            Key::Char('r') => self.refresh_file_manager()?,
+            Key::Enter | Key::Char('l') => self.open_selected_entry()?,
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn open_selected_entry(&mut self) -> io::Result<()> {
+        let Some(path) = self.browser_entries.get(self.browser_selected).cloned() else {
+            return Ok(());
+        };
+        if path.is_dir() {
+            self.browser_dir = path;
+            self.browser_selected = 0;
+            self.refresh_file_manager()?;
+        } else if is_image_path(&path) {
+            self.image_path = Some(path);
+            self.mode = Mode::Image;
+        } else {
+            self.reload(path)?;
+            self.mode = Mode::Normal;
+        }
+        Ok(())
+    }
+
+    fn render_image_preview(&self, rows: usize, cols: usize) -> io::Result<()> {
+        let Some(path) = self.image_path.as_deref() else {
+            return Ok(());
+        };
+        println!("\x1b[7m IMAGE  {} \x1b[0m\r", path.display());
+        print!("{}", render_image(path, cols, rows.saturating_sub(3))?);
+        print!("\r\nEsc: back  o: open externally");
+        io::stdout().flush()
+    }
+
+    fn handle_image(&mut self, key: Key) {
+        match key {
+            Key::Esc | Key::Backspace => self.mode = Mode::Files,
+            Key::Char('o') => {
+                if let Some(path) = self.image_path.as_deref() {
+                    self.message = match open_external(path) {
+                        Ok(()) => String::from("Opened image externally."),
+                        Err(error) => format!("Failed to open image: {error}"),
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn clamp_cursor(&mut self) {
         self.cursor_col = min(self.cursor_col, self.current_line_len());
     }
@@ -975,54 +1675,110 @@ impl Editor {
         self.pro_active && self.syntax_enabled && syntax_for_path(&self.path).is_some()
     }
 
-    fn run_ai(&mut self, prompt: &str) -> io::Result<()> {
+    fn run_ai(&mut self, instructions: &str, prompt: &str, action: AiAction) {
         if !self.pro_active {
-            self.message = String::from("AI features require an active RustVim Pro subscription.");
-            return Ok(());
+            self.message = SUBSCRIPTION_PROMPT.to_owned();
+            return;
         }
-        let Ok(command) = env::var(AI_COMMAND_ENV_VAR) else {
-            self.message = format!("Set {AI_COMMAND_ENV_VAR} to use :ai.");
-            return Ok(());
-        };
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .env("RUSTVIM_AI_PROMPT", prompt)
-            .env("RUSTVIM_AI_FILE", self.path.to_string_lossy().as_ref())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                if let Some(mut stdin) = child.stdin.take() {
-                    stdin.write_all(self.full_text().as_bytes())?;
-                }
-                child.wait_with_output()
-            });
-        match output {
-            Ok(output) if output.status.success() => {
-                let response = String::from_utf8_lossy(&output.stdout);
-                let response = response
-                    .lines()
-                    .next()
-                    .unwrap_or("AI returned no output")
-                    .trim();
+        self.message = String::from("AI request in progress...");
+        let input = self.ai_context(prompt);
+        let result = std::panic::catch_unwind(|| {
+            AiClient::from_env().and_then(|client| client.respond(instructions, &input))
+        });
+        match result {
+            Ok(Ok(response)) => self.apply_ai_response(action, &response),
+            Ok(Err(error)) => {
+                self.message = format!("AI error: {}", truncate_message(&error.to_string(), 160))
+            }
+            Err(_) => self.message = String::from("AI provider crashed; editor recovered safely."),
+        }
+    }
+
+    fn ai_context(&self, prompt: &str) -> String {
+        const MAX_CONTEXT_BYTES: usize = 100_000;
+        let text = self.full_text();
+        if text.len() <= MAX_CONTEXT_BYTES {
+            return format!(
+                "File: {}\nUser request: {prompt}\n\nCurrent file:\n{text}",
+                self.path.display()
+            );
+        }
+
+        let cursor = self.absolute_cursor();
+        let half = MAX_CONTEXT_BYTES / 2;
+        let start = floor_char_boundary(&text, cursor.saturating_sub(half));
+        let end = ceil_char_boundary(&text, min(text.len(), start + MAX_CONTEXT_BYTES));
+        format!(
+            "File: {}\nUser request: {prompt}\nThe file is large; this excerpt surrounds the cursor at byte {cursor} of {}.\n\n{}",
+            self.path.display(),
+            text.len(),
+            &text[start..end]
+        )
+    }
+
+    fn apply_ai_response(&mut self, action: AiAction, response: &str) {
+        let response = strip_code_fence(response).trim();
+        match action {
+            AiAction::Show => {
                 self.message = format!("AI: {}", truncate_message(response, 180));
             }
-            Ok(output) => {
-                let error = String::from_utf8_lossy(&output.stderr);
-                self.message = format!("AI failed: {}", truncate_message(error.trim(), 160));
+            AiAction::Insert => self.insert_ai_text(response),
+            AiAction::Replace => {
+                self.snapshot();
+                self.lines = split_editor_lines(response);
+                if self.lines.is_empty() {
+                    self.lines.push(String::new());
+                }
+                self.cursor_line = 0;
+                self.cursor_col = 0;
+                self.dirty = true;
+                self.message = String::from("AI updated the current file.");
             }
-            Err(error) => self.message = format!("AI failed to start: {error}"),
         }
-        Ok(())
+    }
+
+    fn insert_ai_text(&mut self, text: &str) {
+        self.snapshot();
+        let position = self.absolute_cursor();
+        let mut content = self.full_text();
+        content.insert_str(position, text);
+        self.lines = split_editor_lines(&content);
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.set_absolute_cursor(position + text.len());
+        self.dirty = true;
+        self.message = String::from("AI content inserted.");
+    }
+
+    fn ai_complete(&mut self) {
+        if !self.pro_active {
+            self.message = SUBSCRIPTION_PROMPT.to_owned();
+            return;
+        }
+        let position = self.absolute_cursor();
+        let text = self.full_text();
+        let prefix_start = floor_char_boundary(&text, position.saturating_sub(4000));
+        let suffix_end = ceil_char_boundary(&text, min(text.len(), position + 1000));
+        let input = format!(
+            "Complete code at <CURSOR>. Return only the text to insert.\n\n{}<CURSOR>{}",
+            &text[prefix_start..position],
+            &text[position..suffix_end]
+        );
+        match AiClient::from_env().and_then(|client| {
+            client.respond(
+                "Provide a short, context-aware code completion. Return only the missing text, without Markdown or explanation.",
+                &input,
+            )
+        }) {
+            Ok(response) => self.insert_ai_text(strip_code_fence(&response).trim()),
+            Err(error) => self.message = format!("AI completion error: {}", truncate_message(&error.to_string(), 140)),
+        }
     }
 
     fn handle_hjkl(&mut self, key: char) {
         if !self.pro_active {
-            self.message = String::from(
-                "h/j/k/l navigation is included in RustVim Pro. Use arrow keys for the free tier.",
-            );
+            self.show_subscription_prompt();
             return;
         }
 
@@ -1039,8 +1795,12 @@ impl Editor {
         if self.pro_active {
             return true;
         }
-        self.message = String::from("Exit requires an active RustVim Pro subscription.");
+        self.show_subscription_prompt();
         false
+    }
+
+    fn show_subscription_prompt(&mut self) {
+        self.message = SUBSCRIPTION_PROMPT.to_owned();
     }
 }
 
@@ -1079,7 +1839,7 @@ fn syntax_for_path(path: &Path) -> Option<Syntax> {
     }
 }
 
-fn highlight_syntax(line: &str, syntax: Option<Syntax>) -> String {
+fn highlight_syntax(line: &str, syntax: Option<Syntax>, theme: Theme) -> String {
     let Some(syntax) = syntax else {
         return line.to_owned();
     };
@@ -1105,9 +1865,9 @@ fn highlight_syntax(line: &str, syntax: Option<Syntax>) -> String {
             .iter()
             .any(|marker| rest.starts_with(marker))
         {
-            result.push_str("\x1b[90m");
+            result.push_str(theme.comment());
             result.extend(chars[index..].iter());
-            result.push_str("\x1b[0m");
+            result.push_str(theme.screen());
             break;
         }
         let ch = chars[index];
@@ -1122,18 +1882,18 @@ fn highlight_syntax(line: &str, syntax: Option<Syntax>) -> String {
                 }
                 index += 1;
             }
-            result.push_str("\x1b[32m");
+            result.push_str(theme.string());
             result.extend(chars[start..index].iter());
-            result.push_str("\x1b[0m");
+            result.push_str(theme.screen());
         } else if ch.is_ascii_digit() {
             let start = index;
             index += 1;
             while index < chars.len() && (chars[index].is_ascii_digit() || chars[index] == '.') {
                 index += 1;
             }
-            result.push_str("\x1b[33m");
+            result.push_str(theme.number());
             result.extend(chars[start..index].iter());
-            result.push_str("\x1b[0m");
+            result.push_str(theme.screen());
         } else if ch.is_alphanumeric() || ch == '_' {
             let start = index;
             index += 1;
@@ -1142,9 +1902,9 @@ fn highlight_syntax(line: &str, syntax: Option<Syntax>) -> String {
             }
             let word: String = chars[start..index].iter().collect();
             if keywords.split_whitespace().any(|keyword| keyword == word) {
-                result.push_str("\x1b[35m");
+                result.push_str(theme.keyword());
                 result.push_str(&word);
-                result.push_str("\x1b[0m");
+                result.push_str(theme.screen());
             } else {
                 result.push_str(&word);
             }
@@ -1156,19 +1916,29 @@ fn highlight_syntax(line: &str, syntax: Option<Syntax>) -> String {
     result
 }
 
-fn render_cursor_line(line: &str, cursor_col: usize, syntax: Option<Syntax>) -> String {
+fn render_cursor_line(
+    line: &str,
+    cursor_col: usize,
+    syntax: Option<Syntax>,
+    theme: Theme,
+) -> String {
     let cursor_col = min(cursor_col, line.len());
     let Some(ch) = line[cursor_col..].chars().next() else {
-        return format!("{}\x1b[7m \x1b[0m", highlight_syntax(line, syntax));
+        return format!(
+            "{}\x1b[7m {}",
+            highlight_syntax(line, syntax, theme),
+            theme.screen()
+        );
     };
     let end = cursor_col + ch.len_utf8();
     let prefix = &line[..cursor_col];
     let suffix = &line[end..];
     format!(
-        "{}\x1b[7m{}\x1b[0m{}",
-        highlight_syntax(prefix, syntax),
+        "{}\x1b[7m{}{}{}",
+        highlight_syntax(prefix, syntax, theme),
         ch,
-        highlight_syntax(suffix, syntax)
+        theme.screen(),
+        highlight_syntax(suffix, syntax, theme)
     )
 }
 
@@ -1178,6 +1948,34 @@ fn truncate_message(message: &str, max_len: usize) -> String {
         result.push('…');
     }
     result
+}
+
+fn strip_code_fence(response: &str) -> &str {
+    let trimmed = response.trim();
+    let Some(after_opening) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let after_language = after_opening
+        .split_once('\n')
+        .map(|(_, content)| content)
+        .unwrap_or(after_opening);
+    after_language.strip_suffix("```").unwrap_or(after_language)
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    index = min(index, text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
+    index = min(index, text.len());
+    while index < text.len() && !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 fn read_key() -> io::Result<Key> {
@@ -1197,6 +1995,7 @@ fn read_key() -> io::Result<Key> {
     }
     match byte[0] {
         3 => Ok(Key::CtrlC),
+        9 => Ok(Key::Tab),
         13 => {
             IGNORE_NEXT_LF.store(true, Ordering::Relaxed);
             Ok(Key::Enter)
@@ -1241,6 +2040,41 @@ fn run_stty(args: &[&str]) -> io::Result<()> {
     }
 }
 
+fn terminal_size() -> (usize, usize) {
+    let output = Command::new("stty").arg("size").output();
+    let Some(stdout) = output.ok().filter(|output| output.status.success()) else {
+        return (24, 80);
+    };
+    let output = String::from_utf8_lossy(&stdout.stdout);
+    let mut dimensions = output.split_whitespace();
+    let rows = dimensions.next().and_then(|value| value.parse().ok());
+    let cols = dimensions.next().and_then(|value| value.parse().ok());
+    (rows.unwrap_or(24), cols.unwrap_or(80))
+}
+
+fn truncate_terminal_line(line: &str, terminal_cols: usize) -> String {
+    let max_chars = terminal_cols.saturating_sub(8).max(1);
+    if line.chars().count() <= max_chars {
+        return line.to_owned();
+    }
+    let mut result = line
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    result.push('…');
+    result
+}
+
+fn open_external(path: &Path) -> io::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    Command::new(opener).arg(path).spawn()?.wait()?;
+    Ok(())
+}
+
 fn split_editor_lines(content: &str) -> Vec<String> {
     let mut lines: Vec<String> = content
         .split('\n')
@@ -1267,6 +2101,143 @@ fn is_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
 
+fn is_autocorrect_separator(ch: char) -> bool {
+    matches!(ch, '.' | ',' | '!' | '?' | ':' | ';' | ')' | ']' | '}')
+}
+
+fn autocorrect_text(
+    text: &str,
+    replacements: &std::collections::BTreeMap<String, String>,
+) -> (String, usize) {
+    let mut result = String::with_capacity(text.len());
+    let mut word = String::new();
+    let mut changes = 0;
+
+    let flush_word = |result: &mut String, word: &mut String, changes: &mut usize| {
+        if word.is_empty() {
+            return;
+        }
+        if let Some(replacement) = replacements.get(word) {
+            result.push_str(replacement);
+            *changes += 1;
+        } else {
+            result.push_str(word);
+        }
+        word.clear();
+    };
+
+    for ch in text.chars() {
+        if is_word_char(ch) {
+            word.push(ch);
+        } else {
+            flush_word(&mut result, &mut word, &mut changes);
+            result.push(ch);
+        }
+    }
+    flush_word(&mut result, &mut word, &mut changes);
+    (result, changes)
+}
+
+fn parse_command_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for ch in input.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            } else {
+                current.push(ch);
+            }
+        } else if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+        } else if ch.is_whitespace() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+        } else {
+            current.push(ch);
+        }
+    }
+    if escaped {
+        current.push('\\');
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn render_markdown(lines: &[String], width: usize) -> Vec<String> {
+    let mut output = Vec::new();
+    let mut in_code_block = false;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            output.push(String::from("────────────────────────"));
+            continue;
+        }
+        if in_code_block {
+            output.push(format!("  {line}"));
+            continue;
+        }
+        if let Some(heading) = trimmed.strip_prefix("### ") {
+            output.push(format!("  {}", heading.to_ascii_uppercase()));
+        } else if let Some(heading) = trimmed.strip_prefix("## ") {
+            output.push(format!(" {}", heading.to_ascii_uppercase()));
+            output.push(String::from(" ───────────────────────"));
+        } else if let Some(heading) = trimmed.strip_prefix("# ") {
+            output.push(heading.to_ascii_uppercase());
+            output.push("═".repeat(min(width, heading.chars().count().max(8))));
+        } else if let Some(item) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            output.push(format!("  • {}", strip_markdown_inline(item)));
+        } else if let Some(quote) = trimmed.strip_prefix("> ") {
+            output.push(format!("  │ {}", strip_markdown_inline(quote)));
+        } else if trimmed.is_empty() {
+            output.push(String::new());
+        } else {
+            output.extend(wrap_text(&strip_markdown_inline(trimmed), width));
+        }
+    }
+    output
+}
+
+fn strip_markdown_inline(input: &str) -> String {
+    input
+        .replace("**", "")
+        .replace("__", "")
+        .replace(['`', '*', '_'], "")
+}
+
+fn wrap_text(input: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in input.split_whitespace() {
+        let additional = word.chars().count() + usize::from(!current.is_empty());
+        if !current.is_empty() && current.chars().count() + additional > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 fn next_char_at(chars: &[(usize, char)], pos: usize) -> Option<&(usize, char)> {
     chars.iter().find(|(byte, _)| *byte >= pos)
 }
@@ -1281,12 +2252,11 @@ fn line_marker(cursor: bool, selected: bool) -> &'static str {
 }
 
 fn main() -> io::Result<()> {
-    let path = env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("untitled.txt"));
-    let _raw = RawTerminal::enter()?;
-    let mut editor = Editor::open(path)?;
+    let mut editor = match env::args_os().nth(1) {
+        Some(path) => Editor::open(PathBuf::from(path))?,
+        None => Editor::open_welcome()?,
+    };
+    let _raw = RawTerminal::enter(editor.use_alternate_buffer)?;
 
     loop {
         editor.render()?;
@@ -1302,9 +2272,11 @@ fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        env_value_is_enabled, highlight_syntax, serialize_editor_lines, split_editor_lines,
-        syntax_for_path, PathBuf, Syntax,
+        autocorrect_text, ceil_char_boundary, env_value_is_enabled, floor_char_boundary,
+        highlight_syntax, parse_command_words, render_markdown, serialize_editor_lines,
+        split_editor_lines, strip_code_fence, syntax_for_path, PathBuf, Syntax, Theme,
     };
+    use std::collections::BTreeMap;
 
     #[test]
     fn pro_env_accepts_common_enabled_values() {
@@ -1338,9 +2310,25 @@ mod tests {
 
     #[test]
     fn syntax_highlighting_adds_ansi_colors() {
-        let rendered = highlight_syntax("fn main() { 42 }", Some(Syntax::Rust));
-        assert!(rendered.contains("\x1b[35mfn\x1b[0m"));
-        assert!(rendered.contains("\x1b[33m42\x1b[0m"));
+        let rendered = highlight_syntax("fn main() { 42 }", Some(Syntax::Rust), Theme::TokyoNight);
+        assert!(rendered.contains("\x1b[38;2;187;154;247mfn"));
+        assert!(rendered.contains("\x1b[38;2;255;158;100m42"));
+    }
+
+    #[test]
+    fn strip_code_fence_removes_markdown_wrapper() {
+        assert_eq!(
+            strip_code_fence("```rust\nfn main() {}\n```"),
+            "fn main() {}\n"
+        );
+        assert_eq!(strip_code_fence("plain text"), "plain text");
+    }
+
+    #[test]
+    fn char_boundary_helpers_handle_utf8() {
+        let text = "aЖb";
+        assert_eq!(floor_char_boundary(text, 2), 1);
+        assert_eq!(ceil_char_boundary(text, 2), 3);
     }
 
     #[test]
@@ -1364,5 +2352,40 @@ mod tests {
         let lines = vec!["one".to_string(), String::new(), "two".to_string()];
 
         assert_eq!(serialize_editor_lines(&lines), "one\n\ntwo\n");
+    }
+
+    #[test]
+    fn autocorrect_replaces_complete_words_only() {
+        let replacements = BTreeMap::from([
+            (String::from("teh"), String::from("the")),
+            (String::from("превет"), String::from("привет")),
+        ]);
+        assert_eq!(
+            autocorrect_text("teh theme, превет!", &replacements),
+            (String::from("the theme, привет!"), 2)
+        );
+    }
+
+    #[test]
+    fn markdown_preview_formats_common_blocks() {
+        let rendered = render_markdown(
+            &[
+                String::from("# Title"),
+                String::from("- **item**"),
+                String::from("> quote"),
+            ],
+            40,
+        );
+        assert_eq!(rendered[0], "TITLE");
+        assert_eq!(rendered[2], "  • item");
+        assert_eq!(rendered[3], "  │ quote");
+    }
+
+    #[test]
+    fn mcp_command_parser_supports_quoted_arguments() {
+        assert_eq!(
+            parse_command_words("docs npx -y '@model/context server'"),
+            vec!["docs", "npx", "-y", "@model/context server"]
+        );
     }
 }
