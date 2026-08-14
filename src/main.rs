@@ -308,8 +308,7 @@ impl Editor {
         let viewport_end = min(self.scroll_line + viewport_rows, self.lines.len());
         for index in self.scroll_line..viewport_end {
             let line = &self.lines[index];
-            let selected =
-                self.mode == Mode::VisualLine && (sel_start..=sel_end).contains(&index);
+            let selected = self.mode == Mode::VisualLine && (sel_start..=sel_end).contains(&index);
             let cursor = index == self.cursor_line;
             let marker = self.line_marker(cursor, selected);
             let prefix = if self.show_numbers {
@@ -2440,7 +2439,10 @@ fn render_cursor_line_window(
         .get(start)
         .map(|(index, _)| *index)
         .unwrap_or(line.len());
-    let end_byte = chars.get(end).map(|(index, _)| *index).unwrap_or(line.len());
+    let end_byte = chars
+        .get(end)
+        .map(|(index, _)| *index)
+        .unwrap_or(line.len());
     let window = &line[start_byte..end_byte];
     let local_cursor = if cursor_index <= start {
         0
@@ -2846,8 +2848,8 @@ fn main() -> io::Result<()> {
 mod tests {
     use super::{
         autocorrect_text, ceil_char_boundary, effective_render_dimensions, env_value_is_enabled,
-        floor_char_boundary, highlight_syntax, parse_command_words, render_markdown,
-        render_cursor_line_window, serialize_editor_lines, split_editor_lines, strip_code_fence,
+        floor_char_boundary, highlight_syntax, parse_command_words, render_cursor_line_window,
+        render_markdown, serialize_editor_lines, split_editor_lines, strip_code_fence,
         syntax_for_path, truncate_terminal_line, visible_width, PathBuf, Syntax, Theme,
     };
     use std::collections::BTreeMap;
