@@ -188,3 +188,28 @@ GitHub Actions workflow находится в `.github/workflows/ci.yml`.
 - `:redo` доступна только в Pro. Вкладки: `:tabnew путь`, `:tabnext`, `:tabprev`, `:tabs`; `:vsplit путь` открывает второй буфер как вкладку.
 - Плагины: `:plugins`, `:plugin install имя`, `:plugin remove имя`. Первый запуск плагинов даёт локальный trial на 1 день; плагины не загружают код автоматически.
 - Локальная телеметрия содержит только timestamp и названия событий и пишется в `~/.local/state/rustvim/telemetry.jsonl`. Удалить её можно вручную; сетевой отправки нет.
+
+## Темы и Battle Pass
+
+В бесплатном режиме интерфейс всегда использует только `white`. Все цветные темы
+доступны в Pro: `tokyo-night`, `gruvbox`, `catppuccin`, `dracula`, `nord`,
+`one-dark`, `solarized-dark`, `rose-pine`, `monokai`, `everforest` и `cyberpunk`.
+
+Battle Pass — отдельная бесплатная локальная система прогресса, не входящая в
+Pro. Она хранит сезон, XP и полученные награды только в
+`~/.local/state/rustvim/battle-pass.toml`:
+
+- `:battlepass` или `:bp` — показать сезон и уровень;
+- `:battlepass quest` — показать условие получения XP;
+- `:battlepass claim` — забрать доступную награду.
+
+Изменения текста дают XP автоматически. Battle Pass не делает сетевых запросов.
+
+## Nix-инструменты
+
+`nix develop` предоставляет `rustc`, `cargo`, `rustfmt` и `clippy`:
+
+```sh
+nix develop --command rustfmt --edition 2021 src/main.rs src/config.rs src/license.rs src/plugins.rs src/telemetry.rs src/battle_pass.rs
+nix develop --command cargo clippy --all-targets -- -D warnings
+```

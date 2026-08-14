@@ -1,7 +1,8 @@
 use std::{
     collections::hash_map::DefaultHasher,
-    env, fs, io,
+    env, fs,
     hash::{Hash, Hasher},
+    io,
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -62,7 +63,10 @@ pub fn save(state: &mut LicenseState) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(path, toml::to_string_pretty(state).expect("license state serializes"))
+    fs::write(
+        path,
+        toml::to_string_pretty(state).expect("license state serializes"),
+    )
 }
 
 pub fn access(state: &LicenseState, pro_env: bool, now: SystemTime) -> Access {
@@ -77,7 +81,8 @@ pub fn access(state: &LicenseState, pro_env: bool, now: SystemTime) -> Access {
         .plugins_trial_started_at
         .map(|started| now.saturating_sub(started))
         .unwrap_or(0);
-    let plugin_trial_remaining = Duration::from_secs(86_400).saturating_sub(Duration::from_secs(plugins_elapsed));
+    let plugin_trial_remaining =
+        Duration::from_secs(86_400).saturating_sub(Duration::from_secs(plugins_elapsed));
     Access {
         pro: pro_env || trial_remaining > Duration::ZERO,
         pro_trial_remaining: trial_remaining,
@@ -130,7 +135,10 @@ mod tests {
 
     #[test]
     fn trial_expires_after_thirty_minutes() {
-        let state = LicenseState { trial_started_at: Some(100), ..Default::default() };
+        let state = LicenseState {
+            trial_started_at: Some(100),
+            ..Default::default()
+        };
         assert!(access(&state, false, UNIX_EPOCH + Duration::from_secs(100)).pro);
         assert!(!access(&state, false, UNIX_EPOCH + Duration::from_secs(1901)).pro);
     }

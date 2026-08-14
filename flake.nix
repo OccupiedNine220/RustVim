@@ -5,7 +5,12 @@
 
   outputs = { self, nixpkgs }:
     let
-      systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
       forEachSystem = nixpkgs.lib.genAttrs systems;
     in {
       devShells = forEachSystem (system:
@@ -16,8 +21,9 @@
             packages = [
               pkgs.rustc
               pkgs.cargo
-              pkgs.clippy
               pkgs.rustfmt
+              pkgs.clippy
+              pkgs.pkg-config
             ];
           };
         });

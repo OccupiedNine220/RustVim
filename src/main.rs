@@ -1,9 +1,10 @@
 mod ai;
+mod battle_pass;
 mod config;
 mod license;
 mod plugins;
-mod terminal_graphics;
 mod telemetry;
+mod terminal_graphics;
 
 use std::{
     cmp::{max, min},
@@ -16,6 +17,7 @@ use std::{
 };
 
 use ai::AiClient;
+use battle_pass::BattlePass;
 use config::{AppConfig, McpServerConfig, Theme};
 use license::{Access, LicenseState};
 use plugins::PluginManager;
@@ -141,6 +143,7 @@ struct Editor {
     access: Access,
     plugins: PluginManager,
     agreement_required: bool,
+    battle_pass: BattlePass,
 }
 
 impl Editor {
@@ -150,7 +153,11 @@ impl Editor {
 
     fn open_welcome() -> io::Result<Self> {
         let mut editor = Self::open_with_pro(PathBuf::from("untitled.txt"), pro_active_from_env())?;
-        editor.mode = if editor.agreement_required { Mode::Agreement } else { Mode::Welcome };
+        editor.mode = if editor.agreement_required {
+            Mode::Agreement
+        } else {
+            Mode::Welcome
+        };
         editor.message = if editor.pro_active {
             String::from("RustVim Pro active. Enter: start an empty file. :help: Vim guide.")
         } else {
@@ -237,10 +244,13 @@ impl Editor {
             agreement_required,
             access: access.clone(),
             plugins: PluginManager::new(),
+            battle_pass: BattlePass::load()?,
         };
         if editor.agreement_required {
             editor.mode = Mode::Agreement;
-            editor.message = String::from("Перед первым запуском примите соглашение: Y/Enter — принять, N — выйти.");
+            editor.message = String::from(
+                "Перед первым запуском примите соглашение: Y/Enter — принять, N — выйти.",
+            );
         }
         Ok(editor)
     }
@@ -260,7 +270,11 @@ impl Editor {
         if self.mode == Mode::Welcome {
             return self.render_welcome(terminal_rows, terminal_cols);
         }
-        let reserved_rows = if self.pro_active && self.ad_message.is_none() { 4 } else { 5 };
+        let reserved_rows = if self.pro_active && self.ad_message.is_none() {
+            4
+        } else {
+            5
+        };
         let viewport_rows = terminal_rows.saturating_sub(reserved_rows).max(1);
         self.ensure_cursor_visible(viewport_rows);
         let (sel_start, sel_end) = self.selection_bounds();
@@ -321,7 +335,7 @@ impl Editor {
             Mode::Welcome => "WELCOME",
         };
         print!(
-            "{} {}{}  {}  line {}, col {}  theme:{} {} {}\r\n",
+            "{} {}{}  {}  line {}, col {}  theme:{}  battle-pass:{} {} {}\r\n",
             self.theme.status(),
             self.path.display(),
             if self.dirty { " [+]" } else { "" },
@@ -329,6 +343,7 @@ impl Editor {
             self.cursor_line + 1,
             self.cursor_col + 1,
             self.theme.name(),
+            self.battle_pass.badge(),
             if self.pro_active && self.access.pro_trial_remaining > std::time::Duration::ZERO {
                 format!("trial:{}m", self.access.pro_trial_remaining.as_secs() / 60)
             } else {
@@ -339,7 +354,9 @@ impl Editor {
         if self.mode == Mode::Command {
             print!("{}{}", self.command_prompt, self.command);
         } else if self.mode == Mode::Agreement {
-            print!("Нажмите Y/Enter для принятия, N/Esc — выход. Данные и телеметрия остаются на ПК.");
+            print!(
+                "Нажмите Y/Enter для принятия, N/Esc — выход. Данные и телеметрия остаются на ПК."
+            );
         } else {
             print!("{}", self.message);
         }
@@ -360,8 +377,10 @@ impl Editor {
 
     fn handle_key(&mut self, key: Key) -> io::Result<bool> {
         self.key_presses = self.key_presses.saturating_add(1);
-        if self.key_presses % 50 == 0 {
-            self.ad_message = Some(String::from("RustVim Pro: redo, плагины, темы и окна — попробуйте Pro"));
+        if self.key_presses.is_multiple_of(50) {
+            self.ad_message = Some(String::from(
+                "RustVim Pro: redo, плагины, темы и окна — попробуйте Pro",
+            ));
             telemetry::record("pro_ad_shown").ok();
         }
         match self.mode {
@@ -643,7 +662,7 @@ impl Editor {
             "set noautocorrect" => self.set_autocorrect(false)?,
             "theme" => {
                 self.message = format!(
-                    "Theme: {}. Available with Pro: white, tokyo-night, gruvbox, catppuccin.",
+                    "Theme: {}. Pro themes: white, tokyo-night, gruvbox, catppuccin, dracula, nord, one-dark, solarized-dark, rose-pine, monokai, everforest, cyberpunk.",
                     self.theme.name()
                 );
             }
@@ -658,6 +677,9 @@ impl Editor {
             "tabprev" | "tp" => self.switch_tab(usize::MAX),
             "tabs" => self.list_tabs(),
             "plugins" | "plugin list" => self.list_plugins(),
+            "battlepass" | "battle-pass" | "bp" => self.message = self.battle_pass.status(),
+            "bp claim" | "battlepass claim" => self.claim_battle_pass(),
+            "bp quest" | "battlepass quest" => self.message = String::from("Quest: edit, save, navigate and use Git to earn XP locally."),
             "git" | "git status" => self.run_git(&["status", "--short"]),
             other if other.starts_with("git ") => {
                 let words = parse_command_words(&other[4..]);
@@ -832,7 +854,11 @@ impl Editor {
         self.show_numbers = self.config.editor.line_numbers;
         self.syntax_enabled = self.config.editor.syntax_highlighting;
         self.autocorrect_enabled = self.config.autocorrect.enabled;
-        self.theme = self.config.customization.theme;
+        self.theme = if self.pro_active {
+            self.config.customization.theme
+        } else {
+            Theme::White
+        };
         let alternate_buffer = self.config.editor.alternate_buffer;
         self.set_alternate_buffer(alternate_buffer)?;
         self.message = format!("Reloaded config: {}", self.config_path.display());
@@ -846,7 +872,7 @@ impl Editor {
         }
         let Some(theme) = Theme::parse(name) else {
             self.message =
-                String::from("Unknown theme. Use white, tokyo-night, gruvbox, or catppuccin.");
+                String::from("Unknown theme. Use :theme to list the available Pro themes.");
             return Ok(());
         };
         self.theme = theme;
@@ -1088,6 +1114,13 @@ impl Editor {
     }
 
     fn line_marker(&self, cursor: bool, selected: bool) -> String {
+        if cursor && self.battle_pass.frontier_cursor_unlocked() {
+            return if selected {
+                String::from("◆*")
+            } else {
+                String::from("◆ ")
+            };
+        }
         if !self.pro_active {
             return line_marker(cursor, selected).to_owned();
         }
@@ -1142,20 +1175,40 @@ impl Editor {
     }
 
     fn write_free_metadata(&self, path: &Path) -> io::Result<()> {
-        if self.pro_active { return Ok(()); }
-        let metadata = path.with_extension(format!("{}rustvim-meta.toml", path.extension().and_then(|e| e.to_str()).map(|e| format!("{e}." )).unwrap_or_default()));
+        if self.pro_active {
+            return Ok(());
+        }
+        let metadata = path.with_extension(format!(
+            "{}rustvim-meta.toml",
+            path.extension()
+                .and_then(|e| e.to_str())
+                .map(|e| format!("{e}."))
+                .unwrap_or_default()
+        ));
         fs::write(metadata, "edited_with = \"rustvim-free\"\nwatermark = \"RustVim Free\"\ngit_integration = \"rustvim-free\"\n")
     }
 
     fn run_git(&mut self, args: &[&str]) {
-        let cwd = self.path.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        let cwd = self
+            .path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         let mut git_args = args.to_vec();
         if !self.pro_active && args.first() == Some(&"commit") {
             git_args.extend(["--trailer", "RustVim-Free=true"]);
         }
-        match Command::new("git").args(["-C", cwd.to_string_lossy().as_ref()]).args(&git_args).output() {
+        match Command::new("git")
+            .args(["-C", cwd.to_string_lossy().as_ref()])
+            .args(&git_args)
+            .output()
+        {
             Ok(output) => {
-                let text = String::from_utf8_lossy(if output.stdout.is_empty() { &output.stderr } else { &output.stdout });
+                let text = String::from_utf8_lossy(if output.stdout.is_empty() {
+                    &output.stderr
+                } else {
+                    &output.stdout
+                });
                 self.message = format!("git: {}", truncate_message(text.trim(), 160));
                 telemetry::record("git_command").ok();
             }
@@ -1164,11 +1217,21 @@ impl Editor {
     }
 
     fn new_tab(&mut self, path: PathBuf) {
-        self.tabs.push(TabState { path: self.path.clone(), lines: self.lines.clone(), cursor_line: self.cursor_line, cursor_col: self.cursor_col, dirty: self.dirty });
+        self.tabs.push(TabState {
+            path: self.path.clone(),
+            lines: self.lines.clone(),
+            cursor_line: self.cursor_line,
+            cursor_col: self.cursor_col,
+            dirty: self.dirty,
+        });
         self.current_tab = self.tabs.len();
         self.path = path;
-        self.lines = fs::read_to_string(&self.path).map(|text| split_editor_lines(&text)).unwrap_or_else(|_| vec![String::new()]);
-        if self.lines.is_empty() { self.lines.push(String::new()); }
+        self.lines = fs::read_to_string(&self.path)
+            .map(|text| split_editor_lines(&text))
+            .unwrap_or_else(|_| vec![String::new()]);
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
         self.cursor_line = 0;
         self.cursor_col = 0;
         self.dirty = false;
@@ -1177,41 +1240,90 @@ impl Editor {
     }
 
     fn switch_tab(&mut self, direction: usize) {
-        if self.tabs.is_empty() { self.message = String::from("No other tabs. Use :tabnew path."); return; }
-        let mut all = std::mem::take(&mut self.tabs);
-        all.insert(0, TabState { path: self.path.clone(), lines: self.lines.clone(), cursor_line: self.cursor_line, cursor_col: self.cursor_col, dirty: self.dirty });
-        let next = if direction == usize::MAX {
-            self.current_tab.saturating_sub(1) % all.len()
-        } else {
-            (self.current_tab + direction) % all.len()
+        if self.tabs.is_empty() {
+            self.message = String::from("No other tabs. Use :tabnew path.");
+            return;
+        }
+        let current = TabState {
+            path: self.path.clone(),
+            lines: self.lines.clone(),
+            cursor_line: self.cursor_line,
+            cursor_col: self.cursor_col,
+            dirty: self.dirty,
         };
-        let selected = all.remove(next);
-        self.tabs = all.into_iter().enumerate().filter_map(|(index, tab)| if index == 0 { None } else { Some(tab) }).collect();
+        let total = self.tabs.len() + 1;
+        let selected = if direction == usize::MAX {
+            let selected = self.tabs.pop().expect("tab list is not empty");
+            self.tabs.insert(0, current);
+            self.current_tab = (self.current_tab + total - 1) % total;
+            selected
+        } else {
+            let selected = self.tabs.remove(0);
+            self.tabs.push(current);
+            self.current_tab = (self.current_tab + 1) % total;
+            selected
+        };
         self.path = selected.path;
         self.lines = selected.lines;
         self.cursor_line = selected.cursor_line;
         self.cursor_col = selected.cursor_col;
         self.dirty = selected.dirty;
-        self.current_tab = next;
         self.clamp_cursor();
-        self.message = format!("Tab {}/{}: {}", next + 1, self.tabs.len() + 1, self.path.display());
+        self.message = format!(
+            "Tab {}/{}: {}",
+            self.current_tab + 1,
+            self.tabs.len() + 1,
+            self.path.display()
+        );
     }
 
     fn list_tabs(&mut self) {
-        self.message = format!("Tab {}/{}: {} (use :tabnew, :tabnext, :tabprev)", self.current_tab + 1, self.tabs.len() + 1, self.path.display());
+        self.message = format!(
+            "Tab {}/{}: {} (use :tabnew, :tabnext, :tabprev)",
+            self.current_tab + 1,
+            self.tabs.len() + 1,
+            self.path.display()
+        );
     }
 
     fn list_plugins(&mut self) {
         if !self.access.plugins {
-            self.message = format!("Plugins require Pro; trial expired ({} hours left).", self.access.plugins_trial_remaining.as_secs() / 3600);
+            self.message = format!(
+                "Plugins require Pro; trial expired ({} hours left).",
+                self.access.plugins_trial_remaining.as_secs() / 3600
+            );
             return;
         }
-        self.message = match self.plugins.list() { Ok(names) if names.is_empty() => String::from("No plugins installed."), Ok(names) => format!("Plugins: {}", names.join(", ")), Err(error) => format!("Plugin error: {error}") };
+        self.message = match self.plugins.list() {
+            Ok(names) if names.is_empty() => String::from("No plugins installed."),
+            Ok(names) => format!("Plugins: {}", names.join(", ")),
+            Err(error) => format!("Plugin error: {error}"),
+        };
+    }
+
+    fn claim_battle_pass(&mut self) {
+        match self.battle_pass.claim() {
+            Some(reward) => {
+                self.message = reward.to_owned();
+                telemetry::record("battle_pass_reward_claimed").ok();
+            }
+            None => self.message = String::from("No Battle Pass reward available yet."),
+        }
     }
 
     fn install_plugin(&mut self, name: &str) -> io::Result<()> {
-        if !self.access.plugins { license::start_plugins_trial(&mut self.license_state, SystemTime::now())?; self.access = license::access(&self.license_state, pro_active_from_env(), SystemTime::now()); }
-        if !self.access.plugins { self.message = String::from("Plugin trial expired. RustVim Pro is required."); return Ok(()); }
+        if !self.access.plugins {
+            license::start_plugins_trial(&mut self.license_state, SystemTime::now())?;
+            self.access = license::access(
+                &self.license_state,
+                pro_active_from_env(),
+                SystemTime::now(),
+            );
+        }
+        if !self.access.plugins {
+            self.message = String::from("Plugin trial expired. RustVim Pro is required.");
+            return Ok(());
+        }
         self.plugins.install(name)?;
         self.message = format!("Plugin installed: {name}");
         telemetry::record("plugin_installed").ok();
@@ -1535,6 +1647,7 @@ impl Editor {
     fn snapshot(&mut self) {
         self.undo.push(self.lines.clone());
         self.redo.clear();
+        self.battle_pass.add_xp(1).ok();
         if self.undo.len() > 100 {
             self.undo.remove(0);
         }

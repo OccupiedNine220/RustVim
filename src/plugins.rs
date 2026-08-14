@@ -10,7 +10,9 @@ impl PluginManager {
         let root = std::env::var_os("RUSTVIM_STATE")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("XDG_STATE_HOME").map(PathBuf::from))
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+            .or_else(|| {
+                std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
+            })
             .unwrap_or_else(|| PathBuf::from("."))
             .join("rustvim/plugins");
         Self { root }
@@ -30,14 +32,36 @@ impl PluginManager {
     }
 
     pub fn install(&self, name: &str) -> io::Result<()> {
-        if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid plugin name"));
+        if name.is_empty()
+            || name.contains('/')
+            || name.contains('\\')
+            || name == "."
+            || name == ".."
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid plugin name",
+            ));
         }
         fs::create_dir_all(self.root.join(name))?;
-        fs::write(self.root.join(name).join("plugin.toml"), format!("name = {name:?}\nenabled = true\n"))
+        fs::write(
+            self.root.join(name).join("plugin.toml"),
+            format!("name = {name:?}\nenabled = true\n"),
+        )
     }
 
     pub fn remove(&self, name: &str) -> io::Result<()> {
+        if name.is_empty()
+            || name.contains('/')
+            || name.contains('\\')
+            || name == "."
+            || name == ".."
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid plugin name",
+            ));
+        }
         fs::remove_dir_all(self.root.join(name))
     }
 }

@@ -3,8 +3,16 @@ name: CI
 on:
   push:
     branches: [main, master]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -31,25 +39,76 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets --all-features
 
-  release:
-    name: Build release artifacts
+  build:
+    name: Build ${{ matrix.target }}
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - i686-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - armv7-unknown-linux-gnueabihf
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - mips-unknown-linux-gnu
+          - mipsel-unknown-linux-gnu
+          - mips64-unknown-linux-gnuabi64
+          - mips64el-unknown-linux-gnuabi64
+          - riscv64gc-unknown-linux-gnu
+          - powerpc64le-unknown-linux-gnu
+          - s390x-unknown-linux-gnu
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
-      - name: Build
-        run: cargo build --release --all-targets
+      - name: Build release binaries
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cross build --locked --release --target "$TARGET" --bin rustvim --bin rustvim-mcp
 
-      - name: Upload binaries
+      - name: Package artifacts
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p dist
+          tar -C "target/$TARGET/release" -czf "dist/rustvim-$TARGET.tar.gz" rustvim rustvim-mcp
+          sha256sum "dist/rustvim-$TARGET.tar.gz" > "dist/rustvim-$TARGET.tar.gz.sha256"
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: rustvim-linux-x86_64
-          path: |
-            target/release/rustvim
-            target/release/rustvim-mcp
+          name: rustvim-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: rustvim-*
+          merge-multiple: true
+
+      - name: Build checksums manifest
+        working-directory: dist
+        run: cat *.sha256 > SHA256SUMS
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*
