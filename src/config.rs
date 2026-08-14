@@ -23,6 +23,8 @@ pub struct EditorConfig {
     pub line_numbers: bool,
     pub syntax_highlighting: bool,
     pub alternate_buffer: bool,
+    pub render_rows: Option<usize>,
+    pub render_cols: Option<usize>,
 }
 
 impl Default for EditorConfig {
@@ -31,6 +33,8 @@ impl Default for EditorConfig {
             line_numbers: true,
             syntax_highlighting: true,
             alternate_buffer: true,
+            render_rows: None,
+            render_cols: None,
         }
     }
 }

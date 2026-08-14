@@ -2,6 +2,9 @@
 line_numbers = true
 syntax_highlighting = true
 alternate_buffer = true
+# Pro/Nitro only. Omit to use the current terminal dimensions.
+render_rows = 40
+render_cols = 120
 
 [customization]
 theme = "tokyo-night"

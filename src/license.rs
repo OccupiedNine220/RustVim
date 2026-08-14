@@ -24,6 +24,7 @@ pub struct LicenseState {
 #[derive(Clone, Debug)]
 pub struct Access {
     pub pro: bool,
+    pub nitro: bool,
     pub pro_trial_remaining: Duration,
     pub plugins: bool,
     pub plugins_trial_remaining: Duration,
@@ -69,7 +70,7 @@ pub fn save(state: &mut LicenseState) -> io::Result<()> {
     )
 }
 
-pub fn access(state: &LicenseState, pro_env: bool, now: SystemTime) -> Access {
+pub fn access(state: &LicenseState, nitro_env: bool, pro_env: bool, now: SystemTime) -> Access {
     let now = epoch(now);
     let elapsed = state
         .trial_started_at
@@ -85,6 +86,7 @@ pub fn access(state: &LicenseState, pro_env: bool, now: SystemTime) -> Access {
         Duration::from_secs(86_400).saturating_sub(Duration::from_secs(plugins_elapsed));
     Access {
         pro: pro_env || trial_remaining > Duration::ZERO,
+        nitro: pro_env || nitro_env || trial_remaining > Duration::ZERO,
         pro_trial_remaining: trial_remaining,
         plugins: pro_env || plugin_trial_remaining > Duration::ZERO,
         plugins_trial_remaining: plugin_trial_remaining,
@@ -139,7 +141,18 @@ mod tests {
             trial_started_at: Some(100),
             ..Default::default()
         };
-        assert!(access(&state, false, UNIX_EPOCH + Duration::from_secs(100)).pro);
-        assert!(!access(&state, false, UNIX_EPOCH + Duration::from_secs(1901)).pro);
+        assert!(access(&state, false, false, UNIX_EPOCH + Duration::from_secs(100)).pro);
+        assert!(!access(&state, false, false, UNIX_EPOCH + Duration::from_secs(1901)).pro);
+    }
+
+    #[test]
+    fn nitro_enables_nitro_features_without_granting_pro() {
+        let state = LicenseState {
+            trial_started_at: Some(100),
+            ..Default::default()
+        };
+        let access = access(&state, true, false, UNIX_EPOCH + Duration::from_secs(1901));
+        assert!(access.nitro);
+        assert!(!access.pro);
     }
 }

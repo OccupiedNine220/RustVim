@@ -8,6 +8,7 @@ pub struct BattlePass {
     pub season: String,
     pub xp: u64,
     pub claimed_level: u32,
+    pub premium: bool,
 }
 
 impl Default for BattlePass {
@@ -16,6 +17,7 @@ impl Default for BattlePass {
             season: String::from("Terminal Frontier"),
             xp: 0,
             claimed_level: 0,
+            premium: false,
         }
     }
 }
@@ -55,12 +57,16 @@ impl BattlePass {
             return None;
         }
         self.claimed_level = level;
-        let reward = match level {
-            1 => "Награда: эмблема Terminal Frontier",
-            2 => "Награда: уникальный battle-pass статус",
-            3 => "Награда: эффект курсора Frontier",
-            4 => "Награда: сезонный титул Rust Ranger",
-            _ => "Награда: легендарный сезонный титул",
+        let reward = match (self.premium, level) {
+            (true, 1) => "Премиум-награда: набор Terminal Tokens",
+            (true, 2) => "Премиум-награда: эксклюзивный Nitro-статус",
+            (true, 3) => "Премиум-награда: анимация курсора Nitro",
+            (true, _) => "Премиум-награда: легендарный титул Nitro Ranger",
+            (false, 1) => "Награда: эмблема Terminal Frontier",
+            (false, 2) => "Награда: уникальный battle-pass статус",
+            (false, 3) => "Награда: эффект курсора Frontier",
+            (false, 4) => "Награда: сезонный титул Rust Ranger",
+            (false, _) => "Награда: легендарный сезонный титул",
         };
         self.save().ok();
         Some(reward)
@@ -68,12 +74,18 @@ impl BattlePass {
 
     pub fn status(&self) -> String {
         format!(
-            "Battle Pass {} · level {} · {}/100 XP · claimed {}",
+            "Battle Pass {} · {} · level {} · {}/100 XP · claimed {}",
             self.season,
+            if self.premium { "premium" } else { "free" },
             self.level(),
             self.xp % 100,
             self.claimed_level
         )
+    }
+
+    pub fn set_premium(&mut self, nitro: bool) {
+        self.premium = nitro;
+        let _ = self.save();
     }
 
     pub fn badge(&self) -> String {

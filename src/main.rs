@@ -1,6 +1,7 @@
 mod ai;
 mod battle_pass;
 mod config;
+mod economy;
 mod license;
 mod plugins;
 mod telemetry;
@@ -19,12 +20,31 @@ use std::{
 use ai::AiClient;
 use battle_pass::BattlePass;
 use config::{AppConfig, McpServerConfig, Theme};
+use economy::Economy;
 use license::{Access, LicenseState};
 use plugins::PluginManager;
 use terminal_graphics::{is_image_path, render_image};
 
 const PRO_ENV_VAR: &str = "RUSTVIM_PRO";
+const NITRO_ENV_VAR: &str = "RUSTVIM_NITRO";
 const SUBSCRIPTION_PROMPT: &str = "Оформите подписку RustVim Pro для AI и премиум-функций.";
+const LICENSE_TEXT: &[&str] = &[
+    "ЛИЦЕНЗИОННОЕ СОГЛАШЕНИЕ RUSTVIM",
+    "",
+    "RustVim предоставляется по лицензии MIT. Вы можете использовать, копировать,",
+    "изменять и распространять программу при сохранении текста лицензии и отказа",
+    "от гарантий из исходного проекта.",
+    "",
+    "Nitro, Pro, внутриигровая валюта Terminal Tokens, слоты, лутбоксы и Battle Pass",
+    "являются функциями приложения. Terminal Tokens не являются деньгами, не имеют",
+    "денежной стоимости, не продаются и не обмениваются на реальные товары или деньги.",
+    "Слоты и лутбоксы используют исключительно внутриигровую валюту и не принимают",
+    "платежи, банковские данные или иные реальные средства.",
+    "",
+    "Состояние лицензии, прогресс и внутриигровые данные хранятся локально на этом ПК.",
+    "AI-функции могут отправлять содержимое файла настроенному пользователем endpoint.",
+    "Вы принимаете ответственность за свои данные, конфигурацию и использование ПО.",
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -144,6 +164,7 @@ struct Editor {
     plugins: PluginManager,
     agreement_required: bool,
     battle_pass: BattlePass,
+    economy: Economy,
 }
 
 impl Editor {
@@ -172,7 +193,7 @@ impl Editor {
         if !pro_active && license_state.trial_started_at.is_none() {
             license::start_trial(&mut license_state, now)?;
         }
-        let access = license::access(&license_state, pro_active, now);
+        let access = license::access(&license_state, nitro_active_from_env(), pro_active, now);
         let config_path = config::config_path();
         let config = config::load(&config_path)?;
         let lines = match fs::read_to_string(&path) {
@@ -245,6 +266,7 @@ impl Editor {
             access: access.clone(),
             plugins: PluginManager::new(),
             battle_pass: BattlePass::load()?,
+            economy: Economy::load()?,
         };
         if editor.agreement_required {
             editor.mode = Mode::Agreement;
@@ -270,12 +292,16 @@ impl Editor {
         if self.mode == Mode::Welcome {
             return self.render_welcome(terminal_rows, terminal_cols);
         }
+        if self.mode == Mode::Agreement {
+            return self.render_agreement(terminal_rows, terminal_cols);
+        }
         let reserved_rows = if self.pro_active && self.ad_message.is_none() {
             4
         } else {
             5
         };
-        let viewport_rows = terminal_rows.saturating_sub(reserved_rows).max(1);
+        let (render_rows, render_cols) = self.render_dimensions(terminal_rows, terminal_cols);
+        let viewport_rows = render_rows.saturating_sub(reserved_rows).max(1);
         self.ensure_cursor_visible(viewport_rows);
         let (sel_start, sel_end) = self.selection_bounds();
         let number_width = max(4, self.lines.len().to_string().len());
@@ -299,12 +325,12 @@ impl Editor {
             };
             if self.show_numbers {
                 let prefix = format!("{marker} {:>width$} | ", index + 1, width = number_width);
-                let available_cols = terminal_cols.saturating_sub(visible_width(&prefix));
+                let available_cols = render_cols.saturating_sub(visible_width(&prefix));
                 let rendered_line = truncate_terminal_line(&rendered_line, available_cols);
                 print!("{}{prefix}{rendered_line}\r\n", self.theme.screen());
             } else {
                 let prefix = format!("{marker} ");
-                let available_cols = terminal_cols.saturating_sub(visible_width(&prefix));
+                let available_cols = render_cols.saturating_sub(visible_width(&prefix));
                 let rendered_line = truncate_terminal_line(&rendered_line, available_cols);
                 print!("{}{prefix}{rendered_line}\r\n", self.theme.screen());
             }
@@ -313,7 +339,7 @@ impl Editor {
             print!(
                 "{}{}\r\n",
                 self.theme.screen(),
-                truncate_terminal_line(self.empty_line_marker(), terminal_cols)
+                truncate_terminal_line(self.empty_line_marker(), render_cols)
             );
         }
         if !self.pro_active {
@@ -360,6 +386,20 @@ impl Editor {
         } else {
             print!("{}", self.message);
         }
+        io::stdout().flush()
+    }
+
+    fn render_agreement(&self, rows: usize, cols: usize) -> io::Result<()> {
+        println!(
+            "{}{}{}",
+            self.theme.status(),
+            LICENSE_TEXT[0],
+            self.theme.screen()
+        );
+        for line in LICENSE_TEXT.iter().skip(1).take(rows.saturating_sub(4)) {
+            println!("{}", truncate_terminal_line(line, cols));
+        }
+        print!("Y/Enter — принять; N/Esc — выйти");
         io::stdout().flush()
     }
 
@@ -417,7 +457,9 @@ impl Editor {
                 self.message = String::from("Соглашение принято. Enter или i — открыть буфер.");
                 telemetry::record("agreement_accepted").ok();
             }
-            Key::Char('n') | Key::Char('N') | Key::Char('q') | Key::CtrlC => return Ok(true),
+            Key::Char('n') | Key::Char('N') | Key::Char('q') | Key::Esc | Key::CtrlC => {
+                return Ok(true)
+            }
             _ => {}
         }
         Ok(false)
@@ -660,6 +702,8 @@ impl Editor {
             "autocorrect" => self.autocorrect_document(),
             "set autocorrect" => self.set_autocorrect(true)?,
             "set noautocorrect" => self.set_autocorrect(false)?,
+            "set render full" => self.set_render_size(None)?,
+            other if other.starts_with("set render ") => self.set_render_size(Some(&other[11..]))?,
             "theme" => {
                 self.message = format!(
                     "Theme: {}. Pro themes: white, tokyo-night, gruvbox, catppuccin, dracula, nord, one-dark, solarized-dark, rose-pine, monokai, everforest, cyberpunk.",
@@ -678,7 +722,18 @@ impl Editor {
             "tabs" => self.list_tabs(),
             "plugins" | "plugin list" => self.list_plugins(),
             "battlepass" | "battle-pass" | "bp" => self.message = self.battle_pass.status(),
+            "battlepass premium" | "bp premium" if self.access.nitro => {
+                self.battle_pass.set_premium(true);
+                self.message = String::from("Premium Battle Pass activated through RustVim Nitro.");
+            }
+            "battlepass premium" | "bp premium" => {
+                self.message = String::from("RustVim Nitro is required for the premium Battle Pass.");
+            }
             "bp claim" | "battlepass claim" => self.claim_battle_pass(),
+            "currency" | "tokens" => self.message = self.economy.status(),
+            "slots" | "slot" => self.spin_slots(),
+            "lootbox" | "lootbox open" => self.open_lootbox(),
+            "nitro" | "subscription nitro" => self.message = if self.access.nitro { String::from("RustVim Nitro active: premium Battle Pass and in-game rewards enabled.") } else { String::from("RustVim Nitro required for the premium Battle Pass.") },
             "bp quest" | "battlepass quest" => self.message = String::from("Quest: edit, save, navigate and use Git to earn XP locally."),
             "git" | "git status" => self.run_git(&["status", "--short"]),
             other if other.starts_with("git ") => {
@@ -688,7 +743,7 @@ impl Editor {
             }
             "help" => {
                 self.message = String::from(
-                    "i/a/I/A/o/O | arrows | hjkl Pro | V y d | edits | / :s :set :theme :preview :autocorrect :mcp :config :ai :agent",
+                    "i/a/I/A/o/O | arrows | hjkl Pro | V y d | edits | :currency :slots :lootbox :bp premium | :set render",
                 );
             }
             "set syntax" if self.pro_active => {
@@ -863,6 +918,74 @@ impl Editor {
         self.set_alternate_buffer(alternate_buffer)?;
         self.message = format!("Reloaded config: {}", self.config_path.display());
         Ok(())
+    }
+
+    fn render_dimensions(&self, terminal_rows: usize, terminal_cols: usize) -> (usize, usize) {
+        effective_render_dimensions(
+            self.pro_active,
+            self.config.editor.render_rows,
+            self.config.editor.render_cols,
+            terminal_rows,
+            terminal_cols,
+        )
+    }
+
+    fn set_render_size(&mut self, value: Option<&str>) -> io::Result<()> {
+        if !self.pro_active {
+            self.show_subscription_prompt();
+            return Ok(());
+        }
+        let Some(value) = value else {
+            self.config.editor.render_rows = None;
+            self.config.editor.render_cols = None;
+            self.save_config()?;
+            self.message = String::from("Render area reset to full terminal size.");
+            return Ok(());
+        };
+        let values = value.split_whitespace().collect::<Vec<_>>();
+        let (Some(rows), Some(cols), None) = (values.first(), values.get(1), values.get(2)) else {
+            self.message = String::from("Usage: :set render <rows> <cols> or :set render full");
+            return Ok(());
+        };
+        let (Ok(rows), Ok(cols)) = (rows.parse::<usize>(), cols.parse::<usize>()) else {
+            self.message = String::from("Render dimensions must be positive integers.");
+            return Ok(());
+        };
+        if rows == 0 || cols == 0 {
+            self.message = String::from("Render dimensions must be positive integers.");
+            return Ok(());
+        }
+        self.config.editor.render_rows = Some(rows);
+        self.config.editor.render_cols = Some(cols);
+        self.save_config()?;
+        self.message = format!("Pro render area set to {rows}x{cols}; limited by terminal size.");
+        Ok(())
+    }
+
+    fn spin_slots(&mut self) {
+        self.message = match self.economy.spin() {
+            Some(reward) => format!(
+                "Слоты: выигрыш {reward} {}. {}",
+                economy::CURRENCY_NAME,
+                self.economy.status()
+            ),
+            None => format!(
+                "Слоты стоят {} {currency}; доступна только внутриигровая валюта.",
+                economy::SPIN_COST,
+                currency = economy::CURRENCY_NAME
+            ),
+        };
+    }
+
+    fn open_lootbox(&mut self) {
+        self.message = match self.economy.open_lootbox() {
+            Some(reward) => format!("{reward}. {}", self.economy.status()),
+            None => format!(
+                "Лутбокс стоит {} {currency}; доступна только внутриигровая валюта.",
+                economy::LOOTBOX_COST,
+                currency = economy::CURRENCY_NAME
+            ),
+        };
     }
 
     fn set_theme(&mut self, name: &str) -> io::Result<()> {
@@ -1316,6 +1439,7 @@ impl Editor {
             license::start_plugins_trial(&mut self.license_state, SystemTime::now())?;
             self.access = license::access(
                 &self.license_state,
+                nitro_active_from_env(),
                 pro_active_from_env(),
                 SystemTime::now(),
             );
@@ -1648,6 +1772,7 @@ impl Editor {
         self.undo.push(self.lines.clone());
         self.redo.clear();
         self.battle_pass.add_xp(1).ok();
+        self.economy.earn(1).ok();
         if self.undo.len() > 100 {
             self.undo.remove(0);
         }
@@ -2131,6 +2256,13 @@ fn pro_active_from_env() -> bool {
         .unwrap_or(false)
 }
 
+fn nitro_active_from_env() -> bool {
+    env::var(NITRO_ENV_VAR)
+        .map(|value| env_value_is_enabled(&value))
+        .unwrap_or(false)
+        || pro_active_from_env()
+}
+
 fn env_value_is_enabled(value: &str) -> bool {
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
@@ -2372,6 +2504,22 @@ fn terminal_size() -> (usize, usize) {
     let rows = dimensions.next().and_then(|value| value.parse().ok());
     let cols = dimensions.next().and_then(|value| value.parse().ok());
     (rows.unwrap_or(24), cols.unwrap_or(80))
+}
+
+fn effective_render_dimensions(
+    pro_active: bool,
+    configured_rows: Option<usize>,
+    configured_cols: Option<usize>,
+    terminal_rows: usize,
+    terminal_cols: usize,
+) -> (usize, usize) {
+    if !pro_active {
+        return (terminal_rows, terminal_cols);
+    }
+    (
+        configured_rows.unwrap_or(terminal_rows).min(terminal_rows),
+        configured_cols.unwrap_or(terminal_cols).min(terminal_cols),
+    )
 }
 
 fn truncate_terminal_line(line: &str, max_chars: usize) -> String {
@@ -2634,10 +2782,10 @@ fn main() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        autocorrect_text, ceil_char_boundary, env_value_is_enabled, floor_char_boundary,
-        highlight_syntax, parse_command_words, render_markdown, serialize_editor_lines,
-        split_editor_lines, strip_code_fence, syntax_for_path, truncate_terminal_line,
-        visible_width, PathBuf, Syntax, Theme,
+        autocorrect_text, ceil_char_boundary, effective_render_dimensions, env_value_is_enabled,
+        floor_char_boundary, highlight_syntax, parse_command_words, render_markdown,
+        serialize_editor_lines, split_editor_lines, strip_code_fence, syntax_for_path,
+        truncate_terminal_line, visible_width, PathBuf, Syntax, Theme,
     };
     use std::collections::BTreeMap;
 
@@ -2656,6 +2804,18 @@ mod tests {
                 "{value} should not enable Pro"
             );
         }
+    }
+
+    #[test]
+    fn pro_render_area_can_be_configured_but_free_uses_terminal() {
+        assert_eq!(
+            effective_render_dimensions(false, Some(10), Some(20), 40, 120),
+            (40, 120)
+        );
+        assert_eq!(
+            effective_render_dimensions(true, Some(100), Some(20), 40, 120),
+            (40, 20)
+        );
     }
 
     #[test]
