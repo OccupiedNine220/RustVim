@@ -2,7 +2,6 @@
 line_numbers = true
 syntax_highlighting = true
 alternate_buffer = true
-markdown_preview_width = 88
 
 [customization]
 theme = "tokyo-night"

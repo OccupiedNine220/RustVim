@@ -1,6 +1,9 @@
 mod ai;
 mod config;
+mod license;
+mod plugins;
 mod terminal_graphics;
+mod telemetry;
 
 use std::{
     cmp::{max, min},
@@ -9,10 +12,13 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
+    time::SystemTime,
 };
 
 use ai::AiClient;
 use config::{AppConfig, McpServerConfig, Theme};
+use license::{Access, LicenseState};
+use plugins::PluginManager;
 use terminal_graphics::{is_image_path, render_image};
 
 const PRO_ENV_VAR: &str = "RUSTVIM_PRO";
@@ -20,6 +26,7 @@ const SUBSCRIPTION_PROMPT: &str = "Оформите подписку RustVim Pro
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
+    Agreement,
     Normal,
     Insert,
     VisualLine,
@@ -28,6 +35,15 @@ enum Mode {
     Image,
     MarkdownPreview,
     Welcome,
+}
+
+#[derive(Clone)]
+struct TabState {
+    path: PathBuf,
+    lines: Vec<String>,
+    cursor_line: usize,
+    cursor_col: usize,
+    dirty: bool,
 }
 
 enum Key {
@@ -116,6 +132,15 @@ struct Editor {
     config_path: PathBuf,
     theme: Theme,
     autocorrect_enabled: bool,
+    redo: Vec<Vec<String>>,
+    tabs: Vec<TabState>,
+    current_tab: usize,
+    key_presses: usize,
+    ad_message: Option<String>,
+    license_state: LicenseState,
+    access: Access,
+    plugins: PluginManager,
+    agreement_required: bool,
 }
 
 impl Editor {
@@ -125,7 +150,7 @@ impl Editor {
 
     fn open_welcome() -> io::Result<Self> {
         let mut editor = Self::open_with_pro(PathBuf::from("untitled.txt"), pro_active_from_env())?;
-        editor.mode = Mode::Welcome;
+        editor.mode = if editor.agreement_required { Mode::Agreement } else { Mode::Welcome };
         editor.message = if editor.pro_active {
             String::from("RustVim Pro active. Enter: start an empty file. :help: Vim guide.")
         } else {
@@ -135,6 +160,12 @@ impl Editor {
     }
 
     fn open_with_pro(path: PathBuf, pro_active: bool) -> io::Result<Self> {
+        let mut license_state = license::load()?;
+        let now = SystemTime::now();
+        if !pro_active && license_state.trial_started_at.is_none() {
+            license::start_trial(&mut license_state, now)?;
+        }
+        let access = license::access(&license_state, pro_active, now);
         let config_path = config::config_path();
         let config = config::load(&config_path)?;
         let lines = match fs::read_to_string(&path) {
@@ -168,7 +199,8 @@ impl Editor {
                 (true, false, true, Theme::White, false)
             };
 
-        Ok(Self {
+        let agreement_required = !access.agreement_accepted;
+        let mut editor = Self {
             path,
             lines,
             cursor_line: 0,
@@ -185,7 +217,7 @@ impl Editor {
             search: None,
             show_numbers,
             use_alternate_buffer,
-            pro_active,
+            pro_active: access.pro,
             syntax_enabled,
             scroll_line: 0,
             browser_dir,
@@ -196,11 +228,25 @@ impl Editor {
             config_path,
             theme,
             autocorrect_enabled,
-        })
+            redo: Vec::new(),
+            tabs: Vec::new(),
+            current_tab: 0,
+            key_presses: 0,
+            ad_message: None,
+            license_state,
+            agreement_required,
+            access: access.clone(),
+            plugins: PluginManager::new(),
+        };
+        if editor.agreement_required {
+            editor.mode = Mode::Agreement;
+            editor.message = String::from("Перед первым запуском примите соглашение: Y/Enter — принять, N — выйти.");
+        }
+        Ok(editor)
     }
 
     fn render(&mut self) -> io::Result<()> {
-        print!("\x1b[2J\x1b[H{}", self.theme.screen());
+        print!("{}\x1b[2J\x1b[H", self.theme.screen());
         let (terminal_rows, terminal_cols) = terminal_size();
         if self.mode == Mode::Files {
             return self.render_file_manager(terminal_rows, terminal_cols);
@@ -214,7 +260,7 @@ impl Editor {
         if self.mode == Mode::Welcome {
             return self.render_welcome(terminal_rows, terminal_cols);
         }
-        let reserved_rows = if self.pro_active { 4 } else { 5 };
+        let reserved_rows = if self.pro_active && self.ad_message.is_none() { 4 } else { 5 };
         let viewport_rows = terminal_rows.saturating_sub(reserved_rows).max(1);
         self.ensure_cursor_visible(viewport_rows);
         let (sel_start, sel_end) = self.selection_bounds();
@@ -237,25 +283,34 @@ impl Editor {
             } else {
                 line.to_owned()
             };
-            let rendered_line = truncate_terminal_line(&rendered_line, terminal_cols);
             if self.show_numbers {
-                print!(
-                    "{marker} {:>width$} | {rendered_line}\r\n",
-                    index + 1,
-                    width = number_width
-                );
+                let prefix = format!("{marker} {:>width$} | ", index + 1, width = number_width);
+                let available_cols = terminal_cols.saturating_sub(visible_width(&prefix));
+                let rendered_line = truncate_terminal_line(&rendered_line, available_cols);
+                print!("{}{prefix}{rendered_line}\r\n", self.theme.screen());
             } else {
-                print!("{marker} {rendered_line}\r\n");
+                let prefix = format!("{marker} ");
+                let available_cols = terminal_cols.saturating_sub(visible_width(&prefix));
+                let rendered_line = truncate_terminal_line(&rendered_line, available_cols);
+                print!("{}{prefix}{rendered_line}\r\n", self.theme.screen());
             }
         }
         for _ in viewport_end.saturating_sub(self.scroll_line)..viewport_rows {
-            print!("{}\r\n", self.empty_line_marker());
+            print!(
+                "{}{}\r\n",
+                self.theme.screen(),
+                truncate_terminal_line(self.empty_line_marker(), terminal_cols)
+            );
         }
         if !self.pro_active {
             print!("\x1b[33m{SUBSCRIPTION_PROMPT}\x1b[0m\r\n");
         }
+        if let Some(ad) = &self.ad_message {
+            print!("\x1b[33m{}\x1b[0m\r\n", ad);
+        }
 
         let mode = match self.mode {
+            Mode::Agreement => "AGREEMENT",
             Mode::Normal => "NORMAL",
             Mode::Insert => "INSERT",
             Mode::VisualLine => "VISUAL LINE",
@@ -266,7 +321,7 @@ impl Editor {
             Mode::Welcome => "WELCOME",
         };
         print!(
-            "{} {}{}  {}  line {}, col {}  theme:{} {}\r\n",
+            "{} {}{}  {}  line {}, col {}  theme:{} {} {}\r\n",
             self.theme.status(),
             self.path.display(),
             if self.dirty { " [+]" } else { "" },
@@ -274,10 +329,17 @@ impl Editor {
             self.cursor_line + 1,
             self.cursor_col + 1,
             self.theme.name(),
+            if self.pro_active && self.access.pro_trial_remaining > std::time::Duration::ZERO {
+                format!("trial:{}m", self.access.pro_trial_remaining.as_secs() / 60)
+            } else {
+                String::new()
+            },
             self.theme.screen(),
         );
         if self.mode == Mode::Command {
             print!("{}{}", self.command_prompt, self.command);
+        } else if self.mode == Mode::Agreement {
+            print!("Нажмите Y/Enter для принятия, N/Esc — выход. Данные и телеметрия остаются на ПК.");
         } else {
             print!("{}", self.message);
         }
@@ -297,7 +359,13 @@ impl Editor {
     }
 
     fn handle_key(&mut self, key: Key) -> io::Result<bool> {
+        self.key_presses = self.key_presses.saturating_add(1);
+        if self.key_presses % 50 == 0 {
+            self.ad_message = Some(String::from("RustVim Pro: redo, плагины, темы и окна — попробуйте Pro"));
+            telemetry::record("pro_ad_shown").ok();
+        }
         match self.mode {
+            Mode::Agreement => self.handle_agreement(key),
             Mode::Normal => self.handle_normal(key),
             Mode::Insert => {
                 self.handle_insert(key);
@@ -319,6 +387,21 @@ impl Editor {
             }
             Mode::Welcome => self.handle_welcome(key),
         }
+    }
+
+    fn handle_agreement(&mut self, key: Key) -> io::Result<bool> {
+        match key {
+            Key::Char('y') | Key::Char('Y') | Key::Enter => {
+                license::accept_agreement(&mut self.license_state)?;
+                self.agreement_required = false;
+                self.mode = Mode::Welcome;
+                self.message = String::from("Соглашение принято. Enter или i — открыть буфер.");
+                telemetry::record("agreement_accepted").ok();
+            }
+            Key::Char('n') | Key::Char('N') | Key::Char('q') | Key::CtrlC => return Ok(true),
+            _ => {}
+        }
+        Ok(false)
     }
 
     fn handle_welcome(&mut self, key: Key) -> io::Result<bool> {
@@ -569,6 +652,18 @@ impl Editor {
             }
             "config reload" => self.reload_config()?,
             "mcp" | "mcp list" => self.list_mcp_servers(),
+            "redo" => self.redo(),
+            "tabnew" => self.new_tab(PathBuf::from("untitled.txt")),
+            "tabnext" | "tn" => self.switch_tab(1),
+            "tabprev" | "tp" => self.switch_tab(usize::MAX),
+            "tabs" => self.list_tabs(),
+            "plugins" | "plugin list" => self.list_plugins(),
+            "git" | "git status" => self.run_git(&["status", "--short"]),
+            other if other.starts_with("git ") => {
+                let words = parse_command_words(&other[4..]);
+                let refs = words.iter().map(String::as_str).collect::<Vec<_>>();
+                self.run_git(&refs);
+            }
             "help" => {
                 self.message = String::from(
                     "i/a/I/A/o/O | arrows | hjkl Pro | V y d | edits | / :s :set :theme :preview :autocorrect :mcp :config :ai :agent",
@@ -689,6 +784,10 @@ impl Editor {
                 let path = PathBuf::from(other[2..].trim());
                 self.reload(path)?;
             }
+            other if other.starts_with("tabnew ") => self.new_tab(PathBuf::from(other[7..].trim())),
+            other if other.starts_with("vsplit ") => self.new_tab(PathBuf::from(other[7..].trim())),
+            other if other.starts_with("plugin install ") => self.install_plugin(other[15..].trim())?,
+            other if other.starts_with("plugin remove ") => self.remove_plugin(other[14..].trim())?,
             other if other.starts_with("term ") => {
                 self.open_terminal(Some(other[5..].trim()))?;
             }
@@ -827,10 +926,7 @@ impl Editor {
     }
 
     fn render_markdown_preview(&self, rows: usize, cols: usize) -> io::Result<()> {
-        let width = min(
-            cols.saturating_sub(2).max(20),
-            self.config.editor.markdown_preview_width.max(20),
-        );
+        let width = cols.saturating_sub(2).max(1);
         let rendered = render_markdown(&self.lines, width);
         println!(
             "{} MARKDOWN PREVIEW  {} {}\r",
@@ -1026,6 +1122,7 @@ impl Editor {
 
     fn save(&mut self) -> io::Result<()> {
         fs::write(&self.path, serialize_editor_lines(&self.lines))?;
+        self.write_free_metadata(&self.path)?;
         self.dirty = false;
         self.message = format!("Saved: {}", self.path.display());
         Ok(())
@@ -1037,9 +1134,93 @@ impl Editor {
             return Ok(());
         }
         fs::write(&path, serialize_editor_lines(&self.lines))?;
+        self.write_free_metadata(&path)?;
         self.path = path;
         self.dirty = false;
         self.message = format!("Saved as: {}", self.path.display());
+        Ok(())
+    }
+
+    fn write_free_metadata(&self, path: &Path) -> io::Result<()> {
+        if self.pro_active { return Ok(()); }
+        let metadata = path.with_extension(format!("{}rustvim-meta.toml", path.extension().and_then(|e| e.to_str()).map(|e| format!("{e}." )).unwrap_or_default()));
+        fs::write(metadata, "edited_with = \"rustvim-free\"\nwatermark = \"RustVim Free\"\ngit_integration = \"rustvim-free\"\n")
+    }
+
+    fn run_git(&mut self, args: &[&str]) {
+        let cwd = self.path.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        let mut git_args = args.to_vec();
+        if !self.pro_active && args.first() == Some(&"commit") {
+            git_args.extend(["--trailer", "RustVim-Free=true"]);
+        }
+        match Command::new("git").args(["-C", cwd.to_string_lossy().as_ref()]).args(&git_args).output() {
+            Ok(output) => {
+                let text = String::from_utf8_lossy(if output.stdout.is_empty() { &output.stderr } else { &output.stdout });
+                self.message = format!("git: {}", truncate_message(text.trim(), 160));
+                telemetry::record("git_command").ok();
+            }
+            Err(error) => self.message = format!("git error: {error}"),
+        }
+    }
+
+    fn new_tab(&mut self, path: PathBuf) {
+        self.tabs.push(TabState { path: self.path.clone(), lines: self.lines.clone(), cursor_line: self.cursor_line, cursor_col: self.cursor_col, dirty: self.dirty });
+        self.current_tab = self.tabs.len();
+        self.path = path;
+        self.lines = fs::read_to_string(&self.path).map(|text| split_editor_lines(&text)).unwrap_or_else(|_| vec![String::new()]);
+        if self.lines.is_empty() { self.lines.push(String::new()); }
+        self.cursor_line = 0;
+        self.cursor_col = 0;
+        self.dirty = false;
+        self.message = format!("Opened tab {}.", self.path.display());
+        telemetry::record("tab_opened").ok();
+    }
+
+    fn switch_tab(&mut self, direction: usize) {
+        if self.tabs.is_empty() { self.message = String::from("No other tabs. Use :tabnew path."); return; }
+        let mut all = std::mem::take(&mut self.tabs);
+        all.insert(0, TabState { path: self.path.clone(), lines: self.lines.clone(), cursor_line: self.cursor_line, cursor_col: self.cursor_col, dirty: self.dirty });
+        let next = if direction == usize::MAX {
+            self.current_tab.saturating_sub(1) % all.len()
+        } else {
+            (self.current_tab + direction) % all.len()
+        };
+        let selected = all.remove(next);
+        self.tabs = all.into_iter().enumerate().filter_map(|(index, tab)| if index == 0 { None } else { Some(tab) }).collect();
+        self.path = selected.path;
+        self.lines = selected.lines;
+        self.cursor_line = selected.cursor_line;
+        self.cursor_col = selected.cursor_col;
+        self.dirty = selected.dirty;
+        self.current_tab = next;
+        self.clamp_cursor();
+        self.message = format!("Tab {}/{}: {}", next + 1, self.tabs.len() + 1, self.path.display());
+    }
+
+    fn list_tabs(&mut self) {
+        self.message = format!("Tab {}/{}: {} (use :tabnew, :tabnext, :tabprev)", self.current_tab + 1, self.tabs.len() + 1, self.path.display());
+    }
+
+    fn list_plugins(&mut self) {
+        if !self.access.plugins {
+            self.message = format!("Plugins require Pro; trial expired ({} hours left).", self.access.plugins_trial_remaining.as_secs() / 3600);
+            return;
+        }
+        self.message = match self.plugins.list() { Ok(names) if names.is_empty() => String::from("No plugins installed."), Ok(names) => format!("Plugins: {}", names.join(", ")), Err(error) => format!("Plugin error: {error}") };
+    }
+
+    fn install_plugin(&mut self, name: &str) -> io::Result<()> {
+        if !self.access.plugins { license::start_plugins_trial(&mut self.license_state, SystemTime::now())?; self.access = license::access(&self.license_state, pro_active_from_env(), SystemTime::now()); }
+        if !self.access.plugins { self.message = String::from("Plugin trial expired. RustVim Pro is required."); return Ok(()); }
+        self.plugins.install(name)?;
+        self.message = format!("Plugin installed: {name}");
+        telemetry::record("plugin_installed").ok();
+        Ok(())
+    }
+
+    fn remove_plugin(&mut self, name: &str) -> io::Result<()> {
+        self.plugins.remove(name)?;
+        self.message = format!("Plugin removed: {name}");
         Ok(())
     }
 
@@ -1324,6 +1505,7 @@ impl Editor {
 
     fn undo(&mut self) {
         if let Some(lines) = self.undo.pop() {
+            self.redo.push(self.lines.clone());
             self.lines = lines;
             self.cursor_line = min(self.cursor_line, self.lines.len() - 1);
             self.clamp_cursor();
@@ -1334,8 +1516,25 @@ impl Editor {
         }
     }
 
+    fn redo(&mut self) {
+        if !self.pro_active {
+            self.show_subscription_prompt();
+            return;
+        }
+        if let Some(lines) = self.redo.pop() {
+            self.undo.push(self.lines.clone());
+            self.lines = lines;
+            self.clamp_cursor();
+            self.dirty = true;
+            self.message = String::from("Redo.");
+        } else {
+            self.message = String::from("Nothing to redo.");
+        }
+    }
+
     fn snapshot(&mut self) {
         self.undo.push(self.lines.clone());
+        self.redo.clear();
         if self.undo.len() > 100 {
             self.undo.remove(0);
         }
@@ -1559,7 +1758,12 @@ impl Editor {
     }
 
     fn render_file_manager(&self, rows: usize, cols: usize) -> io::Result<()> {
-        println!("\x1b[7m FILES  {} \x1b[0m\r", self.browser_dir.display());
+        println!(
+            "{} FILES  {} {}\r",
+            self.theme.status(),
+            self.browser_dir.display(),
+            self.theme.screen()
+        );
         let viewport_rows = rows.saturating_sub(3).max(1);
         let start = self
             .browser_selected
@@ -1588,7 +1792,11 @@ impl Editor {
             );
         }
         for _ in end.saturating_sub(start)..viewport_rows {
-            println!("~\r");
+            println!(
+                "{}{}\r",
+                self.theme.screen(),
+                truncate_terminal_line(self.empty_line_marker(), cols)
+            );
         }
         print!("Enter: open  Backspace: parent  r: refresh  Esc: editor");
         io::stdout().flush()
@@ -1925,8 +2133,9 @@ fn render_cursor_line(
     let cursor_col = min(cursor_col, line.len());
     let Some(ch) = line[cursor_col..].chars().next() else {
         return format!(
-            "{}\x1b[7m {}",
+            "{}\x1b[7m {}\x1b[0m{}",
             highlight_syntax(line, syntax, theme),
+            theme.screen(),
             theme.screen()
         );
     };
@@ -1934,7 +2143,7 @@ fn render_cursor_line(
     let prefix = &line[..cursor_col];
     let suffix = &line[end..];
     format!(
-        "{}\x1b[7m{}{}{}",
+        "{}\x1b[7m{}\x1b[0m{}{}",
         highlight_syntax(prefix, syntax, theme),
         ch,
         theme.screen(),
@@ -2052,17 +2261,57 @@ fn terminal_size() -> (usize, usize) {
     (rows.unwrap_or(24), cols.unwrap_or(80))
 }
 
-fn truncate_terminal_line(line: &str, terminal_cols: usize) -> String {
-    let max_chars = terminal_cols.saturating_sub(8).max(1);
-    if line.chars().count() <= max_chars {
+fn truncate_terminal_line(line: &str, max_chars: usize) -> String {
+    if visible_width(line) <= max_chars {
         return line.to_owned();
     }
-    let mut result = line
-        .chars()
-        .take(max_chars.saturating_sub(1))
-        .collect::<String>();
-    result.push('…');
+
+    let mut result = String::new();
+    let mut chars = line.chars().peekable();
+    let content_width = max_chars.saturating_sub(1);
+    let mut visible_chars = 0;
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            result.push(ch);
+            if chars.peek() == Some(&'[') {
+                result.push(chars.next().expect("peeked ANSI sequence"));
+                for sequence_char in chars.by_ref() {
+                    result.push(sequence_char);
+                    if ('@'..='~').contains(&sequence_char) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        if visible_chars >= content_width {
+            break;
+        }
+        result.push(ch);
+        visible_chars += 1;
+    }
+    if max_chars > 0 {
+        result.push('…');
+    }
     result
+}
+
+fn visible_width(line: &str) -> usize {
+    let mut chars = line.chars().peekable();
+    let mut width = 0;
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for sequence_char in chars.by_ref() {
+                if ('@'..='~').contains(&sequence_char) {
+                    break;
+                }
+            }
+        } else {
+            width += 1;
+        }
+    }
+    width
 }
 
 fn open_external(path: &Path) -> io::Result<()> {
@@ -2274,7 +2523,8 @@ mod tests {
     use super::{
         autocorrect_text, ceil_char_boundary, env_value_is_enabled, floor_char_boundary,
         highlight_syntax, parse_command_words, render_markdown, serialize_editor_lines,
-        split_editor_lines, strip_code_fence, syntax_for_path, PathBuf, Syntax, Theme,
+        split_editor_lines, strip_code_fence, syntax_for_path, truncate_terminal_line,
+        visible_width, PathBuf, Syntax, Theme,
     };
     use std::collections::BTreeMap;
 
@@ -2313,6 +2563,13 @@ mod tests {
         let rendered = highlight_syntax("fn main() { 42 }", Some(Syntax::Rust), Theme::TokyoNight);
         assert!(rendered.contains("\x1b[38;2;187;154;247mfn"));
         assert!(rendered.contains("\x1b[38;2;255;158;100m42"));
+    }
+
+    #[test]
+    fn terminal_truncation_ignores_ansi_sequences() {
+        let rendered = truncate_terminal_line("\x1b[31mabcdef\x1b[0m", 4);
+        assert_eq!(visible_width(&rendered), 4);
+        assert!(rendered.contains("abc…"));
     }
 
     #[test]

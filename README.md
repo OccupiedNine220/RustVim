@@ -178,3 +178,13 @@ GitHub Actions workflow находится в `.github/workflows/ci.yml`.
 
 - На `push`, `pull_request` и ручной запуск выполняются `cargo fmt`, `cargo clippy` и `cargo test`.
 - Для тегов вида `v*` собираются release-бинарники `rustvim` и `rustvim-mcp` и публикуются как workflow artifacts.
+
+## Локальные функции и приватность
+
+- При первом запуске RustVim показывает соглашение. Без принятия редактор не начинает работу.
+- Бесплатный режим запускает один локальный 30-минутный trial Pro. Состояние хранится в `~/.local/state/rustvim/license.toml` (или в `RUSTVIM_STATE`) и имеет привязку к пользователю/хосту; RustVim ничего не отправляет в сеть.
+- После каждого 50-го нажатия показывается одно рекламное сообщение Pro в status bar.
+- В бесплатном режиме при сохранении создаётся sidecar `<файл>.rustvim-meta.toml` с отметкой `rustvim-free`; это не меняет исходный текст файла. Команды `:git status`, `:git diff`, `:git add ...` и `:git commit ...` доступны бесплатно, а free-коммиты получают trailer `RustVim-Free=true`.
+- `:redo` доступна только в Pro. Вкладки: `:tabnew путь`, `:tabnext`, `:tabprev`, `:tabs`; `:vsplit путь` открывает второй буфер как вкладку.
+- Плагины: `:plugins`, `:plugin install имя`, `:plugin remove имя`. Первый запуск плагинов даёт локальный trial на 1 день; плагины не загружают код автоматически.
+- Локальная телеметрия содержит только timestamp и названия событий и пишется в `~/.local/state/rustvim/telemetry.jsonl`. Удалить её можно вручную; сетевой отправки нет.

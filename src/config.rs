@@ -23,7 +23,6 @@ pub struct EditorConfig {
     pub line_numbers: bool,
     pub syntax_highlighting: bool,
     pub alternate_buffer: bool,
-    pub markdown_preview_width: usize,
 }
 
 impl Default for EditorConfig {
@@ -32,7 +31,6 @@ impl Default for EditorConfig {
             line_numbers: true,
             syntax_highlighting: true,
             alternate_buffer: true,
-            markdown_preview_width: 88,
         }
     }
 }
