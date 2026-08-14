@@ -70,10 +70,21 @@ jobs:
         with:
           tool: cross
 
+      - name: Install nightly Rust sources for MIPS
+        if: startsWith(matrix.target, 'mips')
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
       - name: Build release binaries
         env:
           TARGET: ${{ matrix.target }}
-        run: cross build --locked --release --target "$TARGET" --bin rustvim --bin rustvim-mcp
+        run: |
+          if [[ "$TARGET" == mips* ]]; then
+            cross +nightly build --locked --release --target "$TARGET" --bin rustvim --bin rustvim-mcp -Z build-std=std,panic_abort
+          else
+            cross build --locked --release --target "$TARGET" --bin rustvim --bin rustvim-mcp
+          fi
 
       - name: Package artifacts
         env:
