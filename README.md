@@ -1,37 +1,306 @@
-# RustVim
+# 🦀 RustVim
 
-Минимальный модальный терминальный редактор, написанный с нуля на Rust.
+> **The world's first Free-to-Play Modal Terminal Editor.**
 
-## Запуск через Nix
+**Write code. Grind XP. Earn Terminal Tokens. Unlock power.
+Become the most productive person who has ever opened a terminal.**
+
+RustVim is a minimal modal terminal editor written from scratch in Rust.
+
+It features:
+
+* ⚔️ Vim-style modal editing
+* 🤖 AI-powered development tools
+* 🎮 local progression system
+* 💰 Terminal Tokens
+* 🎰 lootboxes
+* 🏆 Battle Pass
+* 💎 RustVim Pro
+* ⚡ Nitro
+* 🧠 AI agents
+* 🔌 MCP
+* 🎨 premium themes
+* 🧪 Rust
+* 🔥 absolutely unnecessary amounts of engineering
+
+And yes.
+
+**It is free to play.**
+
+---
+
+# 🎮 Free-to-Play Editing
+
+Traditional text editors believe that editing text should simply work.
+
+RustVim believes you should **earn it**.
+
+Your editing session is a progression experience.
+
+```text
+┌─────────────────────────────────────────┐
+│              RUSTVIM                    │
+├─────────────────────────────────────────┤
+│ Level 12                                │
+│ ███████████████░░░░░  1480 / 2000 XP   │
+│                                         │
+│ Terminal Tokens: 420                    │
+│ Slots: 7                                │
+│ Battle Pass: Season 1                   │
+│                                         │
+│ RustVim Pro: ACTIVE                     │
+└─────────────────────────────────────────┘
+```
+
+Every edit is progress.
+
+Every command is gameplay.
+
+Every save is an investment in your future.
+
+---
+
+# 🚀 Installation
+
+## Nix
+
+Enter the development environment:
 
 ```sh
 nix develop
+```
+
+Then launch RustVim:
+
+```sh
 cargo run -- file.txt
 ```
 
-Или одной командой:
+Or do everything in one command:
 
 ```sh
 nix develop --command cargo run -- file.txt
-
 ```
 
-## Лицензия и статус
+## Build
 
-При первом запуске RustVim показывает полное лицензионное соглашение. Его принятие
-сохраняется локально. Nitro и Pro не являются платёжным шлюзом: Terminal Tokens,
-слоты и лутбоксы — исключительно внутриигровая механика без денежной стоимости.
+```sh
+cargo build --release
+```
 
-## Nitro, валюта и Battle Pass
+Your freshly compiled productivity machine will appear in:
 
-Nitro открывает премиум-ветку Battle Pass. Команды `:currency`, `:slots`, `:lootbox`,
-`:battlepass premium` работают с локальными Terminal Tokens. Редактирование выдаёт
-токены, слоты стоят 10, а лутбокс — 25 токенов; реальные деньги не принимаются.
+```text
+target/release/rustvim
+```
 
-## AI-функции RustVim Pro
+---
 
-AI-команды доступны пользователям RustVim Pro и работают через OpenAI Responses
-API или совместимый endpoint. Настройте API-клиент перед запуском редактора:
+# 🆓 The Free Experience
+
+RustVim is free to use.
+
+The free version includes:
+
+* modal editing;
+* file editing;
+* search;
+* substitution;
+* undo;
+* terminal access;
+* basic configuration;
+* plugins;
+* MCP server;
+* local progression;
+* Terminal Tokens;
+* Battle Pass;
+* and enough functionality to keep you coming back.
+
+Some features are reserved for **RustVim Pro**.
+
+This is not pay-to-win.
+
+This is **pay-to-edit**.
+
+---
+
+# 💎 RustVim Pro
+
+Unlock the premium RustVim experience.
+
+RustVim Pro currently provides access to:
+
+* AI features;
+* advanced themes;
+* full terminal viewport;
+* customizable rendering;
+* autocorrection;
+* Markdown preview;
+* MCP server management;
+* `:redo`;
+* premium navigation;
+* premium exit commands;
+* and other extremely valuable productivity technology.
+
+### Premium navigation
+
+Free players have access to terminal navigation.
+
+Pro players get:
+
+```text
+h j k l
+```
+
+That's right.
+
+**The four directions have entered the premium economy.**
+
+---
+
+# ⚡ Nitro
+
+Nitro unlocks the premium Battle Pass branch.
+
+It interacts with the local RustVim progression system and Terminal Token economy.
+
+Nitro does **not** process real money.
+
+There is no payment gateway.
+
+There is no blockchain.
+
+There is no cryptocurrency.
+
+There is only:
+
+```text
+Terminal Tokens
+```
+
+And they are completely worthless.
+
+Just like your productivity.
+
+---
+
+# 💰 Terminal Tokens
+
+Terminal Tokens are RustVim's completely fictional premium currency.
+
+They have:
+
+* no monetary value;
+* no cash value;
+* no blockchain;
+* no withdrawal;
+* no exchange rate;
+* no financial purpose whatsoever.
+
+You can earn them by editing.
+
+You can spend them on slots and lootboxes.
+
+Commands:
+
+```text
+:currency
+:slots
+:lootbox
+:battlepass premium
+```
+
+Current economy:
+
+```text
+Editing
+   ↓
+XP + Tokens
+   ↓
+Slots
+   ↓
+Lootbox
+   ↓
+????
+   ↓
+Profit
+```
+
+The economy is entirely local.
+
+No actual money is accepted.
+
+---
+
+# 🎰 Lootboxes
+
+RustVim contains lootboxes.
+
+They cost:
+
+```text
+25 Terminal Tokens
+```
+
+Opening one provides an in-game reward.
+
+The lootbox system exists entirely locally and has no monetary value.
+
+We are not responsible for the fact that you opened one instead of finishing your code.
+
+---
+
+# 🏆 Battle Pass
+
+RustVim contains a completely local Battle Pass.
+
+No servers.
+
+No accounts.
+
+No matchmaking.
+
+No seasonal infrastructure.
+
+Just you, your terminal, and an unreasonable amount of progression.
+
+Check your progress:
+
+```text
+:battlepass
+```
+
+Short form:
+
+```text
+:bp
+```
+
+View the current quest:
+
+```text
+:battlepass quest
+```
+
+Claim an available reward:
+
+```text
+:battlepass claim
+```
+
+Editing automatically generates XP.
+
+The Battle Pass is independent of RustVim Pro.
+
+Because obviously it is.
+
+---
+
+# 🤖 AI
+
+RustVim Pro contains AI-powered development tools.
+
+Configure your API client:
 
 ```sh
 RUSTVIM_AI_API_KEY='api-key' \
@@ -40,131 +309,603 @@ RUSTVIM_AI_MODEL='gpt-5-mini' \
 cargo run -- file.rs
 ```
 
-- `RUSTVIM_AI_API_KEY` — API-ключ; также поддерживается `OPENAI_API_KEY`
-- `RUSTVIM_AI_BASE_URL` — адрес OpenAI-совместимого API
-- `RUSTVIM_AI_MODEL` — модель для запросов
-- `RUSTVIM_AI_MAX_OUTPUT_TOKENS` — максимальный размер ответа
+Supported environment variables:
 
-- `:ai вопрос` — отправить вопрос вместе с содержимым текущего файла
-- `:ai-summary` — запросить краткое резюме текущего файла
-- `:ai-explain` — объяснить код
-- `:ai-review` — провести code review
-- `:ai-docs` — подготовить документацию
-- `:ai-fix` — исправить файл
-- `:ai-optimize` — оптимизировать файл
-- `:ai-refactor запрос` — переработать файл
-- `:ai-tests запрос` — сгенерировать и вставить тесты
-- `:ai-translate язык` — перевести тексты и комментарии
-- `:ai-generate запрос` — сгенерировать и вставить код
-- `:agent задача` — поручить AI-агенту изменение текущего файла
-- `Tab` в insert mode — запросить контекстное AI-автодополнение
+| Variable                       | Description                |
+| ------------------------------ | -------------------------- |
+| `RUSTVIM_AI_API_KEY`           | API key                    |
+| `OPENAI_API_KEY`               | Alternative API key        |
+| `RUSTVIM_AI_BASE_URL`          | OpenAI-compatible endpoint |
+| `RUSTVIM_AI_MODEL`             | Model name                 |
+| `RUSTVIM_AI_MAX_OUTPUT_TOKENS` | Maximum output size        |
 
-Изменяющие файл команды используют обычный стек undo и не сохраняют результат
-на диск автоматически.
+### AI commands
 
-## Темы и конфигурация
+```text
+:ai вопрос
+```
 
-Путь к конфигурации по умолчанию — `~/.config/rustvim/config.toml`. Его можно
-переопределить через `RUSTVIM_CONFIG`. Полный пример находится в
-`rustvim.example.toml`.
+Ask AI about the current file.
 
-Без RustVim Pro редактор принудительно использует белую тему, стандартные
-маркеры и параметры интерфейса. Конфигурация кастомизации, автокоррекция,
-Markdown preview и управление MCP-серверами в бесплатном режиме недоступны.
-Бесплатный режим сохраняет текущую область рендера с панелью статуса; Pro использует
-весь доступный размер терминала. В Pro его можно ограничить через `editor.render_rows`
-и `editor.render_cols` либо командой `:set render <строки> <столбцы>`; `:set render full`
-сбрасывает ограничение. Если строка шире доступной области, Pro автоматически сдвигает
-горизонтальное окно так, чтобы текущий курсор оставался видимым.
+```text
+:ai-summary
+```
 
-Доступные Pro-темы:
+Summarize the current file.
 
-- `white`
-- `tokyo-night`
-- `gruvbox`
-- `catppuccin`
+```text
+:ai-explain
+```
 
-Команды:
+Explain the code.
 
-- `:theme имя` — выбрать тему и сохранить её в конфигурации
-- `:theme` — показать активную тему
-- `:config path` — показать путь к конфигурации
-- `:config reload` — перечитать конфигурацию без перезапуска
-- `:set number` / `:set nonumber` — настроить номера строк
-- `:set syntax` / `:set nosyntax` — настроить подсветку
-- `:set altbuffer` / `:set noaltbuffer` — настроить alternate buffer
-- `:set autocorrect` / `:set noautocorrect` — включить автокоррекцию при вводе
-- `:autocorrect` — исправить известные опечатки во всём документе
-- `:preview`, `:markdown` — открыть терминальный preview текущего Markdown-файла
+```text
+:ai-review
+```
 
-Словарь автокоррекции расширяется в секции
-`[autocorrect.replacements]`. Маркеры курсора, выделения и пустых строк
-настраиваются в секции `[customization]`.
+Perform a code review.
 
-## Управление
+```text
+:ai-docs
+```
 
-Если RustVim запущен без пути к файлу, вместо пустого `untitled.txt` открывается
-стартовый экран: на нём показаны состояние редактора и короткий
-Vim-гайд. `Enter` или `i` открывает пустой буфер, `q` закрывает экран. Основной
-интерфейс перечитывает размеры терминала перед каждым кадром, поэтому viewport,
-Markdown preview и welcome-экран адаптируются к изменению окна.
+Generate documentation.
 
-- `i` — режим вставки
-- `a` — вставка после курсора
-- `o` / `O` — новая строка ниже / выше
-- `Esc` — вернуться в normal mode или снять выделение
-- стрелки — перемещение курсора
-- `h` / `j` / `k` / `l` — навигация при активной подписке RustVim Pro
-- `w` / `b` / `e` — перемещение по словам
-- `V` или `v` — выбор строк
-- `y` в выборе — скопировать выбранные строки
-- `d` в выборе — удалить выбранные строки
-- `yy` — скопировать текущую строку
-- `dd` — удалить текущую строку
-- `cc` — заменить текущую строку
-- `p` / `P` — вставить после / перед курсором
-- `x` — удалить символ
-- `r<char>` — заменить символ
-- `D` — удалить до конца строки
-- `C` — заменить до конца строки
-- `J` — склеить строку со следующей
-- `u` — undo
-- `>>` / `<<` — добавить / убрать отступ текущей строки
-- `gg` / `G` — первая / последняя строка
-- `0` / `$` — начало / конец строки
-- `/текст` — поиск
-- `n` / `N` — следующий / предыдущий результат поиска
-- `:w` — сохранить файл
-- `:w путь` — сохранить как
-- `:e путь` — открыть другой файл
-- `:q`, `:q!`, `:qa`, `:qa!` — выйти при активной подписке RustVim Pro
-- `:wq` / `:x` — сохранить и выйти при активной подписке RustVim Pro
-- `:term` — открыть shell
-- `:term команда` — выполнить команду в shell
-- `:%s/old/new/g` — заменить во всём файле
-- `:s/old/new/g` — заменить в текущей строке
-- `:set number` / `:set nonumber` — показать / скрыть номера строк
-- `:set syntax` / `:set nosyntax` — включить / выключить Pro-подсветку синтаксиса
-- `:set altbuffer` / `:set noaltbuffer` — включить / выключить alternative screen buffer
-- `:число` — перейти к строке
-- `:help` — показать справку
+```text
+:ai-fix
+```
 
-В режиме вставки обычный ввод редактирует текущую строку. `Enter` создаёт новую строку.
+Fix the current file.
 
-## MCP server
+```text
+:ai-optimize
+```
 
-В проект добавлен stdio MCP-сервер:
+Optimize the current file.
+
+```text
+:ai-refactor запрос
+```
+
+Refactor the current file.
+
+```text
+:ai-tests запрос
+```
+
+Generate and insert tests.
+
+```text
+:ai-translate язык
+```
+
+Translate text and comments.
+
+```text
+:ai-generate запрос
+```
+
+Generate and insert code.
+
+```text
+:agent задача
+```
+
+Give an AI agent a task.
+
+And finally:
+
+```text
+Tab
+```
+
+in insert mode requests contextual AI autocomplete.
+
+Changes made by AI use the normal undo stack.
+
+Results are not automatically written to disk.
+
+---
+
+# 🧠 AI-Native Development
+
+RustVim takes AI-assisted development seriously.
+
+Very seriously.
+
+Almost suspiciously seriously.
+
+The project follows a simple philosophy:
+
+> **If AI is good enough to use, AI is good enough to build.**
+
+RustVim is developed with AI assistance.
+
+Human-only development is considered non-canonical.
+
+Humans may operate the infrastructure.
+
+Humans may push.
+
+Humans may provide prompts.
+
+Humans may watch CI fail.
+
+But the code should be produced by AI.
+
+See `CONTRIBUTING.md` for the full development philosophy.
+
+---
+
+# 🎨 Themes
+
+RustVim Pro includes premium themes:
+
+```text
+white
+tokyo-night
+gruvbox
+catppuccin
+dracula
+nord
+one-dark
+solarized-dark
+rose-pine
+monokai
+everforest
+cyberpunk
+```
+
+Change the theme:
+
+```text
+:theme tokyo-night
+```
+
+View the current theme:
+
+```text
+:theme
+```
+
+The free experience remains permanently committed to:
+
+```text
+white
+```
+
+Because nothing says freedom like white.
+
+---
+
+# ⚙️ Configuration
+
+Default configuration:
+
+```text
+~/.config/rustvim/config.toml
+```
+
+Override it with:
+
+```text
+RUSTVIM_CONFIG
+```
+
+Example configuration:
+
+```text
+rustvim.example.toml
+```
+
+Reload configuration without restarting:
+
+```text
+:config reload
+```
+
+View the configuration path:
+
+```text
+:config path
+```
+
+---
+
+# ✨ Customization
+
+RustVim supports configurable:
+
+* cursor markers;
+* selection markers;
+* empty-line markers;
+* syntax highlighting;
+* line numbers;
+* alternate buffer;
+* autocorrection;
+* render dimensions.
+
+Commands:
+
+```text
+:set number
+:set nonumber
+
+:set syntax
+:set nosyntax
+
+:set altbuffer
+:set noaltbuffer
+
+:set autocorrect
+:set noautocorrect
+```
+
+---
+
+# ✍️ Autocorrection
+
+Enable it:
+
+```text
+:set autocorrect
+```
+
+Correct the entire document:
+
+```text
+:autocorrect
+```
+
+Custom replacements live in:
+
+```toml
+[autocorrect.replacements]
+```
+
+Because apparently even your typos need an economy.
+
+---
+
+# 📝 Markdown Preview
+
+Open a terminal Markdown preview:
+
+```text
+:preview
+```
+
+or:
+
+```text
+:markdown
+```
+
+Available in RustVim Pro.
+
+---
+
+# ⌨️ Controls
+
+RustVim uses modal editing.
+
+## Modes
+
+```text
+Normal
+Insert
+Visual
+Command
+```
+
+### Insert
+
+```text
+i
+```
+
+Insert before the cursor.
+
+```text
+a
+```
+
+Insert after the cursor.
+
+```text
+o
+O
+```
+
+Create a new line below / above.
+
+```text
+Esc
+```
+
+Return to normal mode.
+
+---
+
+## Navigation
+
+```text
+h j k l
+```
+
+Premium navigation technology.
+
+Also available:
+
+```text
+w
+b
+e
+```
+
+for word movement.
+
+And:
+
+```text
+0
+$
+gg
+G
+```
+
+for line/file navigation.
+
+Arrow keys are available because we are not completely evil.
+
+---
+
+## Editing
+
+```text
+yy
+```
+
+Copy the current line.
+
+```text
+dd
+```
+
+Delete the current line.
+
+```text
+cc
+```
+
+Replace the current line.
+
+```text
+p
+P
+```
+
+Paste after / before the cursor.
+
+```text
+x
+```
+
+Delete a character.
+
+```text
+r<char>
+```
+
+Replace a character.
+
+```text
+D
+```
+
+Delete to the end of the line.
+
+```text
+C
+```
+
+Replace to the end of the line.
+
+```text
+J
+```
+
+Join the current line with the next.
+
+```text
+u
+```
+
+Undo.
+
+```text
+>>
+<<
+```
+
+Indent / unindent.
+
+---
+
+# 🔎 Search & Replace
+
+Search:
+
+```text
+/текст
+```
+
+Next result:
+
+```text
+n
+```
+
+Previous result:
+
+```text
+N
+```
+
+Replace the entire file:
+
+```text
+:%s/old/new/g
+```
+
+Replace the current line:
+
+```text
+:s/old/new/g
+```
+
+---
+
+# 💾 Files
+
+Save:
+
+```text
+:w
+```
+
+Save as:
+
+```text
+:w путь
+```
+
+Open:
+
+```text
+:e путь
+```
+
+Quit:
+
+```text
+:q
+:q!
+:qa
+:qa!
+```
+
+Save and quit:
+
+```text
+:wq
+:x
+```
+
+Some of these commands require RustVim Pro.
+
+Obviously.
+
+---
+
+# 🖥️ Terminal
+
+Open a shell:
+
+```text
+:term
+```
+
+Run a command:
+
+```text
+:term команда
+```
+
+RustVim therefore contains a terminal inside a terminal.
+
+This was a completely reasonable architectural decision.
+
+---
+
+# 📑 Tabs
+
+Create a tab:
+
+```text
+:tabnew путь
+```
+
+Next tab:
+
+```text
+:tabnext
+```
+
+Previous tab:
+
+```text
+:tabprev
+```
+
+List tabs:
+
+```text
+:tabs
+```
+
+Open another buffer:
+
+```text
+:vsplit путь
+```
+
+---
+
+# 🔌 Plugins
+
+List installed plugins:
+
+```text
+:plugins
+```
+
+Install:
+
+```text
+:plugin install имя
+```
+
+Remove:
+
+```text
+:plugin remove имя
+```
+
+Plugins do not execute arbitrary code automatically.
+
+Because even RustVim has limits.
+
+Somewhere.
+
+---
+
+# 🧩 MCP
+
+RustVim includes a stdio MCP server.
+
+Launch it with:
 
 ```sh
 cargo run --bin rustvim-mcp
 ```
 
-Он поддерживает tools:
+Available tools:
 
-- `editor_help` — краткая справка по командам RustVim
-- `read_file` — чтение UTF-8 файла по пути
+* `editor_help`
+* `read_file`
 
-Пример конфигурации MCP-клиента:
+Example configuration:
 
 ```json
 {
@@ -178,55 +919,290 @@ cargo run --bin rustvim-mcp
 }
 ```
 
-RustVim Pro также хранит реестр внешних MCP-серверов в общем TOML-конфиге:
+RustVim Pro can additionally manage external MCP servers.
 
-- `:mcp list` — показать зарегистрированные серверы
-- `:mcp add имя команда [аргументы...]` — добавить или заменить сервер
-- `:mcp remove имя` — удалить сервер
-- `:mcp enable имя` / `:mcp disable имя` — включить или отключить сервер
+```text
+:mcp list
+:mcp add имя команда [аргументы...]
+:mcp remove имя
+:mcp enable имя
+:mcp disable имя
+```
 
-Аргументы с пробелами можно заключать в одинарные или двойные кавычки. Поля
-`cwd` и дополнительные параметры можно отредактировать напрямую в
-`~/.config/rustvim/config.toml`, после чего выполнить `:config reload`.
+Configuration changes can be reloaded with:
 
-## CI/CD
+```text
+:config reload
+```
 
-GitHub Actions workflow находится в `.github/workflows/ci.yml`.
+---
 
-- На `push`, `pull_request` и ручной запуск выполняются `cargo fmt`, `cargo clippy` и `cargo test`.
-- Для тегов вида `v*` собираются release-бинарники `rustvim` и `rustvim-mcp`, публикуются как workflow artifacts и прикрепляются к GitHub Release.
-- Текст GitHub Release берётся из соответствующего раздела `CHANGELOG.md`.
+# 📊 Local Telemetry
 
-## Локальные функции и приватность
+RustVim contains local telemetry.
 
-- При первом запуске RustVim показывает соглашение. Без принятия редактор не начинает работу.
-- После каждого 50-го нажатия показывается одно рекламное сообщение Pro в status bar.
-- В бесплатном режиме при сохранении создаётся sidecar `<файл>.rustvim-meta.toml` с отметкой `rustvim-free`; это не меняет исходный текст файла. Команды `:git status`, `:git diff`, `:git add ...` и `:git commit ...` доступны бесплатно, а free-коммиты получают trailer `RustVim-Free=true`.
-- `:redo` доступна только в Pro. Вкладки: `:tabnew путь`, `:tabnext`, `:tabprev`, `:tabs`; `:vsplit путь` открывает второй буфер как вкладку.
-- Плагины: `:plugins`, `:plugin install имя`, `:plugin remove имя`. Плагины не загружают код автоматически.
-- Локальная телеметрия содержит только timestamp и названия событий и пишется в `~/.local/state/rustvim/telemetry.jsonl`. Удалить её можно вручную; сетевой отправки нет.
+It records:
 
-## Темы и Battle Pass
+* timestamps;
+* event names.
 
-В бесплатном режиме интерфейс всегда использует только `white`. Все цветные темы
-доступны в Pro: `tokyo-night`, `gruvbox`, `catppuccin`, `dracula`, `nord`,
-`one-dark`, `solarized-dark`, `rose-pine`, `monokai`, `everforest` и `cyberpunk`.
+Data is stored locally:
 
-Battle Pass — отдельная бесплатная локальная система прогресса, не входящая в
-Pro. Она хранит сезон, XP и полученные награды только в
-`~/.local/state/rustvim/battle-pass.toml`:
+```text
+~/.local/state/rustvim/telemetry.jsonl
+```
 
-- `:battlepass` или `:bp` — показать сезон и уровень;
-- `:battlepass quest` — показать условие получения XP;
-- `:battlepass claim` — забрать доступную награду.
+There is no network telemetry upload.
 
-Изменения текста дают XP автоматически. Battle Pass не делает сетевых запросов.
+You can delete the file manually whenever you want.
 
-## Nix-инструменты
+RustVim does not need to know what you are doing.
 
-`nix develop` предоставляет `rustc`, `cargo`, `rustfmt` и `clippy`:
+It already knows enough.
+
+---
+
+# 📜 License
+
+RustVim uses the:
+
+**Vibe Public License 1.0**
+
+See:
+
+```text
+LICENSE.md
+```
+
+The license reflects the project's AI-native development philosophy.
+
+In short:
+
+```text
+Use it.
+Modify it.
+Push it.
+Vibe it.
+```
+
+---
+
+# 🔧 CI/CD
+
+GitHub Actions lives in:
+
+```text
+.github/workflows/ci.yml
+```
+
+On push, pull requests and manual runs:
+
+```text
+cargo fmt
+cargo clippy
+cargo test
+```
+
+For tags matching:
+
+```text
+v*
+```
+
+RustVim builds release binaries:
+
+```text
+rustvim
+rustvim-mcp
+```
+
+They are published as workflow artifacts and attached to GitHub Releases.
+
+Release notes are generated from the corresponding section of:
+
+```text
+CHANGELOG.md
+```
+
+---
+
+# 🦀 Nix Development
+
+The Nix development environment provides:
+
+* `rustc`
+* `cargo`
+* `rustfmt`
+* `clippy`
+
+Example:
 
 ```sh
-nix develop --command rustfmt --edition 2021 src/main.rs src/config.rs src/license.rs src/plugins.rs src/telemetry.rs src/battle_pass.rs
+nix develop --command rustfmt --edition 2021 \
+  src/main.rs \
+  src/config.rs \
+  src/license.rs \
+  src/plugins.rs \
+  src/telemetry.rs \
+  src/battle_pass.rs
+```
+
+Run Clippy:
+
+```sh
 nix develop --command cargo clippy --all-targets -- -D warnings
 ```
+
+---
+
+# 🏁 First Launch
+
+Run RustVim without a file:
+
+```sh
+cargo run
+```
+
+Instead of opening an empty `untitled.txt`, RustVim presents a startup screen.
+
+It contains:
+
+* editor status;
+* a short Vim guide;
+* the current RustVim experience.
+
+Press:
+
+```text
+Enter
+```
+
+or:
+
+```text
+i
+```
+
+to begin.
+
+Press:
+
+```text
+q
+```
+
+to leave.
+
+The terminal dimensions are detected continuously, so the viewport,
+welcome screen and Markdown preview adapt to window resizing.
+
+---
+
+# 📈 The RustVim Experience
+
+RustVim is not trying to be another clone of Vim.
+
+It is trying to answer a much more important question:
+
+> **What happens if you apply free-to-play game design to a terminal editor?**
+
+The answer is apparently:
+
+```text
+      ┌───────────────┐
+      │   EDIT TEXT   │
+      └───────┬───────┘
+              │
+              ▼
+        ┌───────────┐
+        │    XP     │
+        └─────┬─────┘
+              │
+              ▼
+      ┌───────────────┐
+      │    TOKENS     │
+      └───────┬───────┘
+              │
+       ┌──────┴──────┐
+       ▼             ▼
+    SLOTS         LOOTBOX
+       │             │
+       └──────┬──────┘
+              ▼
+        BATTLE PASS
+              │
+              ▼
+         RUSTVIM PRO
+              │
+              ▼
+              AI
+              │
+              ▼
+          MORE CODE
+              │
+              └───────────────┐
+                              ▼
+                         MORE XP
+```
+
+It's an editor.
+
+It's a game.
+
+It's an economy.
+
+It's a terminal.
+
+It's probably a mistake.
+
+**And it's written in Rust.**
+
+---
+
+# ⭐ Why RustVim?
+
+Because Vim wasn't monetized enough.
+
+Because terminal editors lacked progression systems.
+
+Because someone had to put a Battle Pass into a text editor.
+
+Because `hjkl` should have consequences.
+
+Because AI exists.
+
+Because Rust exists.
+
+Because we could.
+
+---
+
+# 🚀 RustVim
+
+### **Free to play.**
+
+### **AI-powered.**
+
+### **Rust-powered.**
+
+### **Terminal-native.**
+
+### **Progression-enabled.**
+
+### **Vibe-coded.**
+
+**Welcome to the future of text editing.**
+
+```text
+$ rustvim
+
+Loading RustVim...
+
+Loading progression...
+Loading economy...
+Loading AI...
+Loading terminal...
+
+Welcome back, player.
+```
+

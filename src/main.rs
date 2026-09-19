@@ -57,6 +57,7 @@ enum Mode {
     Image,
     MarkdownPreview,
     Welcome,
+    Terminal,
 }
 
 #[derive(Clone)]
@@ -66,6 +67,89 @@ struct TabState {
     cursor_line: usize,
     cursor_col: usize,
     dirty: bool,
+}
+
+/// Embedded terminal pane (Pro feature): an in-editor shell session with
+/// scrollback rendered as part of the editor UI.
+struct TerminalPane {
+    output: Vec<String>,
+    input: String,
+    cwd: PathBuf,
+    commands_run: u64,
+    last_status: String,
+}
+
+impl TerminalPane {
+    fn new(cwd: PathBuf) -> Self {
+        Self {
+            output: vec![String::from(
+                "RustVim embedded terminal (Pro). Esc — назад в редактор, 'exit' — закрыть.",
+            )],
+            input: String::new(),
+            cwd,
+            commands_run: 0,
+            last_status: String::new(),
+        }
+    }
+
+    fn run(&mut self, command: &str) -> io::Result<()> {
+        self.output.push(format!("❯ {command}"));
+        let result = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(&self.cwd)
+            .output();
+        match result {
+            Ok(output) => {
+                let text = String::from_utf8_lossy(&output.stdout);
+                for line in split_editor_lines(&text) {
+                    self.output.push(truncate_message_ansi(&line, 500));
+                }
+                let errors = String::from_utf8_lossy(&output.stderr);
+                if !errors.trim().is_empty() {
+                    for line in split_editor_lines(&errors) {
+                        self.output.push(format!(
+                            "\x1b[31m{}\x1b[0m",
+                            truncate_message_ansi(&line, 500)
+                        ));
+                    }
+                }
+                self.last_status = format!("exit {}", output.status.code().unwrap_or(-1));
+            }
+            Err(error) => self.last_status = format!("spawn error: {error}"),
+        }
+        self.commands_run = self.commands_run.saturating_add(1);
+        Ok(())
+    }
+}
+
+fn truncate_message_ansi(line: &str, max_chars: usize) -> String {
+    if visible_width(line) <= max_chars {
+        return line.to_owned();
+    }
+    let mut result = String::new();
+    let mut width = 0;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && chars.peek() == Some(&'[') {
+            result.push(ch);
+            result.push(chars.next().expect("peeked escape bracket"));
+            for sequence_char in chars.by_ref() {
+                result.push(sequence_char);
+                if ('@'..='~').contains(&sequence_char) {
+                    break;
+                }
+            }
+            continue;
+        }
+        if width >= max_chars.saturating_sub(1) {
+            result.push('…');
+            break;
+        }
+        result.push(ch);
+        width += 1;
+    }
+    result
 }
 
 enum Key {
@@ -165,6 +249,11 @@ struct Editor {
     agreement_required: bool,
     battle_pass: BattlePass,
     economy: Economy,
+    terminal: Option<TerminalPane>,
+    pending_count: Option<u32>,
+    marks: std::collections::BTreeMap<char, usize>,
+    relativenumber: bool,
+    last_viewport_rows: Option<usize>,
 }
 
 impl Editor {
@@ -267,6 +356,11 @@ impl Editor {
             plugins: PluginManager::new(),
             battle_pass: BattlePass::load()?,
             economy: Economy::load()?,
+            terminal: None,
+            pending_count: None,
+            marks: std::collections::BTreeMap::new(),
+            relativenumber: false,
+            last_viewport_rows: None,
         };
         if editor.agreement_required {
             editor.mode = Mode::Agreement;
@@ -289,6 +383,9 @@ impl Editor {
         if self.mode == Mode::MarkdownPreview {
             return self.render_markdown_preview(terminal_rows, terminal_cols);
         }
+        if self.mode == Mode::Terminal {
+            return self.render_terminal(terminal_rows, terminal_cols);
+        }
         if self.mode == Mode::Welcome {
             return self.render_welcome(terminal_rows, terminal_cols);
         }
@@ -300,8 +397,12 @@ impl Editor {
         } else {
             5
         };
-        let (render_rows, render_cols) = self.render_dimensions(terminal_rows, terminal_cols);
+        // The editor viewport always fills the entire terminal; the old
+        // configurable shrink made Pro users see a tiny render area.
+        let render_rows = terminal_rows;
+        let render_cols = terminal_cols;
         let viewport_rows = render_rows.saturating_sub(reserved_rows).max(1);
+        self.last_viewport_rows = Some(viewport_rows);
         self.ensure_cursor_visible(viewport_rows);
         let (sel_start, sel_end) = self.selection_bounds();
         let number_width = max(4, self.lines.len().to_string().len());
@@ -312,7 +413,16 @@ impl Editor {
             let cursor = index == self.cursor_line;
             let marker = self.line_marker(cursor, selected);
             let prefix = if self.show_numbers {
-                format!("{marker} {:>width$} | ", index + 1, width = number_width)
+                if self.relativenumber {
+                    let number = if cursor {
+                        index + 1
+                    } else {
+                        index.abs_diff(self.cursor_line)
+                    };
+                    format!("{marker} {:>width$} | ", number, width = number_width)
+                } else {
+                    format!("{marker} {:>width$} | ", index + 1, width = number_width)
+                }
             } else {
                 format!("{marker} ")
             };
@@ -361,6 +471,7 @@ impl Editor {
             Mode::Image => "IMAGE",
             Mode::MarkdownPreview => "MARKDOWN PREVIEW",
             Mode::Welcome => "WELCOME",
+            Mode::Terminal => "TERMINAL",
         };
         print!(
             "{} {}{}  {}  line {}, col {}  theme:{}  battle-pass:{} {} {}\r\n",
@@ -447,6 +558,10 @@ impl Editor {
                 Ok(false)
             }
             Mode::Welcome => self.handle_welcome(key),
+            Mode::Terminal => {
+                self.handle_terminal(key);
+                Ok(false)
+            }
         }
     }
 
@@ -497,6 +612,13 @@ impl Editor {
         }
 
         match key {
+            Key::Char('0') if self.pending_count.is_none() => self.cursor_col = 0,
+            Key::Char(ch) if ch.is_ascii_digit() => {
+                let digit = ch.to_digit(10).unwrap_or(0);
+                let base = self.pending_count.take().unwrap_or(0);
+                self.pending_count = Some(base.saturating_mul(10).saturating_add(digit));
+                return Ok(false);
+            }
             Key::Char(':') => {
                 self.command.clear();
                 self.command_prompt = ':';
@@ -546,7 +668,7 @@ impl Editor {
                 self.visual_anchor = self.cursor_line;
                 self.message = String::from("Line selection. Use arrows, y, d, Esc.");
             }
-            Key::Char('g' | 'd' | 'y' | 'c' | 'r' | '>' | '<') => {
+            Key::Char('g' | 'd' | 'y' | 'c' | 'r' | '>' | '<' | 'z' | 'm' | '`' | '\'') => {
                 self.pending = match key {
                     Key::Char(ch) => Some(ch),
                     _ => None,
@@ -559,24 +681,73 @@ impl Editor {
             Key::Char('D') => self.delete_to_end_of_line(),
             Key::Char('C') => self.change_to_end_of_line(),
             Key::Char('J') => self.join_with_next_line(),
-            Key::Char('w') => self.move_word_forward(),
-            Key::Char('b') => self.move_word_backward(),
-            Key::Char('e') => self.move_word_end(),
             Key::Char('n') => self.search_next(),
             Key::Char('N') => self.search_previous(),
-            Key::Char('0') => self.cursor_col = 0,
+            Key::Char('^') => self.cursor_col = first_non_blank(&self.lines[self.cursor_line]),
+            Key::Char('*') => self.search_word_under_cursor(),
             Key::Char('$') => self.cursor_col = self.current_line_len(),
-            Key::Char('G') => self.move_to_last_line(),
+            Key::Char('G') => {
+                let count = self.pending_count.take();
+                match count {
+                    Some(count) if count > 0 => {
+                        self.cursor_line =
+                            min(count as usize - 1, self.lines.len().saturating_sub(1));
+                        self.clamp_cursor();
+                    }
+                    _ => self.move_to_last_line(),
+                }
+            }
+            Key::Char('w') => self.repeat_motion(1, |editor| editor.move_word_forward()),
+            Key::Char('b') => self.repeat_motion(1, |editor| editor.move_word_backward()),
+            Key::Char('e') => self.repeat_motion(1, |editor| editor.move_word_end()),
             Key::Char(ch @ ('h' | 'j' | 'k' | 'l')) => self.handle_hjkl(ch),
             Key::ArrowUp => self.move_up(),
             Key::ArrowDown => self.move_down(),
             Key::ArrowLeft => self.move_left(),
             Key::ArrowRight => self.move_right(),
-            Key::Esc => self.message.clear(),
+            Key::Esc => {
+                self.pending_count = None;
+                self.message.clear();
+            }
             Key::CtrlC => return Ok(self.try_exit()),
             _ => {}
         }
+        self.pending_count = None;
         Ok(false)
+    }
+
+    /// Apply a pending count to a motion; defaults to `default` repeats.
+    fn repeat_motion(&mut self, default: u32, motion: impl Fn(&mut Self)) {
+        let count = self.pending_count.take().unwrap_or(default).max(1);
+        for _ in 0..count {
+            motion(self);
+        }
+    }
+
+    fn search_word_under_cursor(&mut self) {
+        let line = &self.lines[self.cursor_line];
+        let word: String = line[self.cursor_col.min(line.len())..]
+            .chars()
+            .take_while(|ch| is_word_char(*ch))
+            .collect();
+        let word = if word.is_empty() {
+            line[..self.cursor_col.min(line.len())]
+                .chars()
+                .rev()
+                .take_while(|ch| is_word_char(*ch))
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
+        } else {
+            word
+        };
+        if word.is_empty() {
+            self.message = String::from("No word under cursor.");
+            return;
+        }
+        self.search = Some(word);
+        self.search_next();
     }
 
     fn handle_pending(&mut self, pending: char, key: Key) -> io::Result<bool> {
@@ -585,7 +756,14 @@ impl Editor {
                 self.cursor_line = 0;
                 self.clamp_cursor();
             }
-            ('d', Key::Char('d')) => self.delete_current_line(),
+            ('d', Key::Char('d')) => {
+                let count = self.pending_count.take().unwrap_or(1).max(1);
+                for _ in 0..count {
+                    if self.cursor_line + 1 < self.lines.len() || self.lines.len() > 1 {
+                        self.delete_current_line();
+                    }
+                }
+            }
             ('y', Key::Char('y')) => self.yank_current_line(),
             ('c', Key::Char('c')) => {
                 self.delete_current_line();
@@ -596,12 +774,55 @@ impl Editor {
             ('r', Key::Char(ch)) if !ch.is_control() => self.replace_char(ch),
             ('>', Key::Char('>')) => self.indent_current_line(),
             ('<', Key::Char('<')) => self.outdent_current_line(),
+            ('z', Key::Char('z')) => self.scroll_cursor(0),
+            ('z', Key::Char('t')) => self.scroll_cursor(0),
+            ('z', Key::Char('b')) => self.scroll_cursor(usize::MAX),
+            ('m', Key::Char(label)) if label.is_ascii_alphabetic() => self.set_mark(label),
+            ('`' | '\'', Key::Char(label)) if label.is_ascii_alphabetic() => {
+                self.jump_to_mark(label)
+            }
             (first, Key::Char(second)) => {
                 self.message = format!("Unknown command: {first}{second}")
             }
             (first, _) => self.message = format!("Cancelled pending command: {first}"),
         }
+        self.pending_count = None;
         Ok(false)
+    }
+
+    fn scroll_cursor(&mut self, position: usize) {
+        let viewport_rows = self.last_viewport_rows.unwrap_or(24);
+        self.scroll_line = if position == usize::MAX {
+            self.cursor_line
+                .saturating_sub(viewport_rows.saturating_sub(1))
+        } else {
+            self.cursor_line.saturating_sub(viewport_rows / 2)
+        };
+        self.message = String::from("Scrolled (zz/zb).");
+    }
+
+    fn set_mark(&mut self, label: char) {
+        if !self.pro_active {
+            self.show_subscription_prompt();
+            return;
+        }
+        self.marks.insert(label, self.cursor_line);
+        self.message = format!("Mark '{label}' set at line {}.", self.cursor_line + 1);
+    }
+
+    fn jump_to_mark(&mut self, label: char) {
+        if !self.pro_active {
+            self.show_subscription_prompt();
+            return;
+        }
+        match self.marks.get(&label).copied() {
+            Some(line) => {
+                self.cursor_line = min(line, self.lines.len().saturating_sub(1));
+                self.clamp_cursor();
+                self.message = format!("Jumped to mark '{label}'.");
+            }
+            None => self.message = format!("Mark '{label}' not set."),
+        }
     }
 
     fn handle_insert(&mut self, key: Key) {
@@ -702,6 +923,23 @@ impl Editor {
             }
             "preview" | "markdown" | "md-preview" => self.open_markdown_preview(),
             "autocorrect" => self.autocorrect_document(),
+            "sort" if self.pro_active => self.sort_lines(false),
+            "sort" => self.show_subscription_prompt(),
+            "sort!" if self.pro_active => self.sort_lines(true),
+            "sort!" => self.show_subscription_prompt(),
+            "noh" | "nohlsearch" => {
+                self.search = None;
+                self.message = String::from("Search cleared.");
+            }
+            "set relativenumber" | "set rnu" if self.pro_active => {
+                self.relativenumber = true;
+                self.message = String::from("Relative line numbers enabled.");
+            }
+            "set relativenumber" | "set rnu" => self.show_subscription_prompt(),
+            "set norelativenumber" | "set nornu" => {
+                self.relativenumber = false;
+                self.message = String::from("Relative line numbers disabled.");
+            }
             "set autocorrect" => self.set_autocorrect(true)?,
             "set noautocorrect" => self.set_autocorrect(false)?,
             "set render full" => self.set_render_size(None)?,
@@ -731,12 +969,45 @@ impl Editor {
             "battlepass premium" | "bp premium" => {
                 self.message = String::from("RustVim Nitro is required for the premium Battle Pass.");
             }
-            "bp claim" | "battlepass claim" => self.claim_battle_pass(),
-            "currency" | "tokens" => self.message = self.economy.status(),
+            "bp claim premium" | "battlepass claim premium" => self.claim_battle_pass(true),
+            "bp claim" | "battlepass claim" => self.claim_battle_pass(false),
+            "currency" | "tokens" | "gems" => self.message = self.economy.status(),
             "slots" | "slot" => self.spin_slots(),
-            "lootbox" | "lootbox open" => self.open_lootbox(),
+            "lootbox rare" => self.open_lootbox_of_kind(true),
+            "lootbox" | "lootbox open" => self.open_lootbox_of_kind(false),
+            "inventory" | "inv" => self.message = self.economy.inventory_report(),
+            "daily" | "daily reward" => self.claim_daily_reward(),
+            "ad" | "watch ad" => self.watch_ad(),
+            "achievements" | "ach" => self.list_achievements(),
+            "leaderboard" | "lb" => self.message = self.fake_leaderboard(),
+            "title" => {
+                self.message = String::from(
+                    "Активный титул: ... (use :title <название> из инвентаря)",
+                );
+                if let Some(title) = &self.economy.active_title {
+                    self.message = format!("Активный титул: {title}");
+                }
+            }
+            other if other.starts_with("title ") => {
+                let name = other[6..].trim();
+                self.message = match self.economy.set_active_title(name) {
+                    Some(title) => format!("Титул активирован: {title}"),
+                    None => String::from("Такого титула нет в инвентаре: :inventory"),
+                };
+            }
+            "marks" => {
+                self.message = if self.marks.is_empty() {
+                    String::from("No marks set. Pro: m{a-z} to set, `{letter} to jump.")
+                } else {
+                    self.marks
+                        .iter()
+                        .map(|(label, line)| format!("'{label} → {}", line + 1))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+            }
             "nitro" | "subscription nitro" => self.message = if self.access.nitro { String::from("RustVim Nitro active: premium Battle Pass and in-game rewards enabled.") } else { String::from("RustVim Nitro required for the premium Battle Pass.") },
-            "bp quest" | "battlepass quest" => self.message = String::from("Quest: edit, save, navigate and use Git to earn XP locally."),
+            "bp quest" | "battlepass quest" => self.message = String::from("Квесты видны в :battlepass — правки, сохранения, git, терминал и лутбоксы дают XP."),
             "git" | "git status" => self.run_git(&["status", "--short"]),
             other if other.starts_with("git ") => {
                 let words = parse_command_words(&other[4..]);
@@ -745,7 +1016,7 @@ impl Editor {
             }
             "help" => {
                 self.message = String::from(
-                    "i/a/I/A/o/O | arrows | hjkl Pro | V y d | edits | :currency :slots :lootbox :bp premium | :set render",
+                    "i/a/I/A/o/O | 5j/3w/12G counts | zz/zb | * ^ | V y d | :sort Pro | m/` marks Pro | :term Pro | :daily :ad :lootbox [rare] :inventory :title :achievements :leaderboard :bp :bp claim [premium]",
                 );
             }
             "set syntax" if self.pro_active => {
@@ -922,52 +1193,26 @@ impl Editor {
         Ok(())
     }
 
-    fn render_dimensions(&self, terminal_rows: usize, terminal_cols: usize) -> (usize, usize) {
-        effective_render_dimensions(
-            self.pro_active,
-            self.config.editor.render_rows,
-            self.config.editor.render_cols,
-            terminal_rows,
-            terminal_cols,
-        )
-    }
-
     fn set_render_size(&mut self, value: Option<&str>) -> io::Result<()> {
-        if !self.pro_active {
-            self.show_subscription_prompt();
-            return Ok(());
-        }
-        let Some(value) = value else {
-            self.config.editor.render_rows = None;
-            self.config.editor.render_cols = None;
-            self.save_config()?;
-            self.message = String::from("Render area reset to full terminal size.");
-            return Ok(());
-        };
-        let values = value.split_whitespace().collect::<Vec<_>>();
-        let (Some(rows), Some(cols), None) = (values.first(), values.get(1), values.get(2)) else {
-            self.message = String::from("Usage: :set render <rows> <cols> or :set render full");
-            return Ok(());
-        };
-        let (Ok(rows), Ok(cols)) = (rows.parse::<usize>(), cols.parse::<usize>()) else {
-            self.message = String::from("Render dimensions must be positive integers.");
-            return Ok(());
-        };
-        if rows == 0 || cols == 0 {
-            self.message = String::from("Render dimensions must be positive integers.");
-            return Ok(());
-        }
-        self.config.editor.render_rows = Some(rows);
-        self.config.editor.render_cols = Some(cols);
+        // Rendering always fills the terminal now; keep the command for
+        // compatibility and reset any stale saved dimensions.
+        self.config.editor.render_rows = None;
+        self.config.editor.render_cols = None;
         self.save_config()?;
-        self.message = format!("Pro render area set to {rows}x{cols}; limited by terminal size.");
+        self.message = if value.is_none() {
+            String::from("Render area reset to full terminal size.")
+        } else {
+            String::from("RustVim now always renders the full terminal size; stale render limits were removed.")
+        };
         Ok(())
     }
 
     fn spin_slots(&mut self) {
+        let reels = self.economy.spin_reels();
         self.message = match self.economy.spin() {
             Some(reward) => format!(
-                "Слоты: выигрыш {reward} {}. {}",
+                "Слоты {:?}: выигрыш {reward} {}. {}",
+                reels,
                 economy::CURRENCY_NAME,
                 self.economy.status()
             ),
@@ -979,15 +1224,82 @@ impl Editor {
         };
     }
 
-    fn open_lootbox(&mut self) {
-        self.message = match self.economy.open_lootbox() {
-            Some(reward) => format!("{reward}. {}", self.economy.status()),
+    fn open_lootbox_of_kind(&mut self, rare: bool) {
+        let cost = if rare {
+            economy::RARE_LOOTBOX_COST
+        } else {
+            economy::LOOTBOX_COST
+        };
+        self.message = match self.economy.open_lootbox_of_kind(rare) {
+            Some(opened) => {
+                let _ = self.battle_pass.add_quest_progress("lootbox", 1);
+                format!("{} {}", opened.text, self.economy.status())
+            }
             None => format!(
                 "Лутбокс стоит {} {currency}; доступна только внутриигровая валюта.",
-                economy::LOOTBOX_COST,
+                cost,
                 currency = economy::CURRENCY_NAME
             ),
         };
+    }
+
+    fn claim_daily_reward(&mut self) {
+        self.message = match self.economy.claim_daily(SystemTime::now()) {
+            Some(text) => text,
+            None => String::from(
+                "Ежедневная награда уже получена. Возвращайся завтра (или меняй системные часы).",
+            ),
+        };
+    }
+
+    fn watch_ad(&mut self) {
+        self.message = match self.economy.watch_ad() {
+            Ok(text) => text,
+            Err(error) => format!("Ad error: {error}"),
+        };
+    }
+
+    fn list_achievements(&mut self) {
+        if self.economy.achievements.is_empty() {
+            self.message = String::from(
+                "Достижений нет. Правь, сохраняй, открывай лутбоксы — на этом держится вся прогрессия.",
+            );
+            return;
+        }
+        self.message = format!(
+            "Достижения: {}",
+            self.economy
+                .achievements
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    /// A competitive ladder where every competitor is a bot and you decide
+    /// your own rank in your heart.
+    fn fake_leaderboard(&self) -> String {
+        let bots = [
+            ("vim_master_9000", 9_999),
+            ("emacs_defector", 7_204),
+            ("zz_deployer", 5_100),
+            ("semicolon_sam", 2_450),
+            ("q_wq_enjoyer", 830),
+        ];
+        let player = (String::from("ты (Rust Ranger)"), self.economy.balance);
+        let mut rows: Vec<(String, u64)> = bots
+            .iter()
+            .map(|(name, score)| (name.to_string(), *score))
+            .collect();
+        rows.push(player);
+        rows.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
+        let mut lines = vec![String::from("-season leaderboard-")];
+        for (index, (name, score)) in rows.iter().enumerate() {
+            lines.push(format!("{}. {name}: {score}", index + 1));
+        }
+        lines.push(String::from("Топ-3 получают эксклюзивную рамку профиля."));
+        lines.join("\n")
     }
 
     fn set_theme(&mut self, name: &str) -> io::Result<()> {
@@ -1282,7 +1594,19 @@ impl Editor {
         fs::write(&self.path, serialize_editor_lines(&self.lines))?;
         self.write_free_metadata(&self.path)?;
         self.dirty = false;
-        self.message = format!("Saved: {}", self.path.display());
+        self.battle_pass.add_quest_progress("saves", 1).ok();
+        if self
+            .economy
+            .unlock_achievement("first_save")
+            .unwrap_or(false)
+        {
+            self.message = format!(
+                "Saved: {} · достижение «first_save»! (+25 токенов)",
+                self.path.display()
+            );
+        } else {
+            self.message = format!("Saved: {}", self.path.display());
+        }
         Ok(())
     }
 
@@ -1335,6 +1659,7 @@ impl Editor {
                     &output.stdout
                 });
                 self.message = format!("git: {}", truncate_message(text.trim(), 160));
+                self.battle_pass.add_quest_progress("git", 1).ok();
                 telemetry::record("git_command").ok();
             }
             Err(error) => self.message = format!("git error: {error}"),
@@ -1426,14 +1751,10 @@ impl Editor {
         };
     }
 
-    fn claim_battle_pass(&mut self) {
-        match self.battle_pass.claim() {
-            Some(reward) => {
-                self.message = reward.to_owned();
-                telemetry::record("battle_pass_reward_claimed").ok();
-            }
-            None => self.message = String::from("No Battle Pass reward available yet."),
-        }
+    fn claim_battle_pass(&mut self, premium_track: bool) {
+        let rewards = self.battle_pass.claim(premium_track);
+        self.message = rewards.join("\n");
+        telemetry::record("battle_pass_reward_claimed").ok();
     }
 
     fn install_plugin(&mut self, name: &str) -> io::Result<()> {
@@ -1545,6 +1866,22 @@ impl Editor {
             self.clamp_cursor();
             self.message = format!("Substituted {changed} occurrence(s).");
         }
+    }
+
+    fn sort_lines(&mut self, reverse: bool) {
+        self.snapshot();
+        let (start, end) = if self.mode == Mode::VisualLine {
+            let (start, end) = self.selection_bounds();
+            (start, end + 1)
+        } else {
+            (0, self.lines.len())
+        };
+        self.lines[start..end].sort();
+        if reverse {
+            self.lines[start..end].reverse();
+        }
+        self.dirty = true;
+        self.message = String::from("Sorted.");
     }
 
     fn insert_char(&mut self, ch: char) {
@@ -1773,10 +2110,28 @@ impl Editor {
     fn snapshot(&mut self) {
         self.undo.push(self.lines.clone());
         self.redo.clear();
-        self.battle_pass.add_xp(1).ok();
+        let boost = self.economy.consume_boost_edit();
+        let xp = (boost * 10.0).round().max(1.0) as u64;
+        self.battle_pass.add_xp(xp).ok();
+        self.battle_pass.add_quest_progress("edits", 1).ok();
         self.economy.earn(1).ok();
+        self.track_edit_achievements();
         if self.undo.len() > 100 {
             self.undo.remove(0);
+        }
+    }
+
+    fn track_edit_achievements(&mut self) {
+        let total = self.undo.len() as u64;
+        if total >= 50 {
+            let _ = self
+                .economy
+                .unlock_achievement("grinder: 50 правок в сессии");
+        }
+        if self.lines.len() >= 500 {
+            let _ = self
+                .economy
+                .unlock_achievement("novelist: файл на 500 строк");
         }
     }
 
@@ -1935,6 +2290,33 @@ impl Editor {
     }
 
     fn open_terminal(&mut self, command: Option<&str>) -> io::Result<()> {
+        if !self.pro_active {
+            // Free tier keeps the old "suspend the whole editor" terminal,
+            // interrupted by the occasional ad message.
+            if self.key_presses.is_multiple_of(2) {
+                self.message = String::from(
+                    "RustVim Pro: встроенный терминал со scrollback — часть подписки. Открыт внешний терминал.",
+                );
+            }
+            return self.suspend_and_spawn_terminal(command);
+        }
+        let cwd = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let mut pane = TerminalPane::new(cwd);
+        if let Some(command) = command.filter(|command| !command.is_empty()) {
+            pane.run(command)?;
+        }
+        self.terminal = Some(pane);
+        self.mode = Mode::Terminal;
+        telemetry::record("embedded_terminal_opened").ok();
+        Ok(())
+    }
+
+    fn suspend_and_spawn_terminal(&mut self, command: Option<&str>) -> io::Result<()> {
         RawTerminal::suspend_for_child()?;
 
         let status = if let Some(command) = command.filter(|command| !command.is_empty()) {
@@ -1960,6 +2342,67 @@ impl Editor {
             Err(error) => self.message = format!("Terminal failed: {error}"),
         }
         Ok(())
+    }
+
+    fn render_terminal(&self, rows: usize, cols: usize) -> io::Result<()> {
+        let Some(terminal) = &self.terminal else {
+            self.modeless_message_line("Terminal is closed.");
+            return io::stdout().flush();
+        };
+        println!(
+            "{} EMBEDDED TERMINAL — {} — {} {}\r",
+            self.theme.status(),
+            terminal.cwd.display(),
+            terminal.last_status,
+            self.theme.screen()
+        );
+        let output_rows = rows.saturating_sub(3).max(1);
+        let start = terminal.output.len().saturating_sub(output_rows);
+        for line in &terminal.output[start..] {
+            println!("{}\r", truncate_terminal_line(line, cols));
+        }
+        for _ in terminal.output.len()..output_rows {
+            println!("{}\r", self.theme.screen());
+        }
+        print!("❯ {}\x1b[K█", terminal.input);
+        io::stdout().flush()
+    }
+
+    fn modeless_message_line(&self, message: &str) {
+        print!("{message}");
+    }
+
+    fn handle_terminal(&mut self, key: Key) {
+        let Some(terminal) = &mut self.terminal else {
+            self.mode = Mode::Normal;
+            return;
+        };
+        match key {
+            Key::Esc => {
+                self.mode = Mode::Normal;
+                self.message = String::from("Embedded terminal suspended (kept in background).");
+            }
+            Key::Enter => {
+                let command = std::mem::take(&mut terminal.input);
+                if command.trim() == "exit" || command.trim() == "quit" {
+                    self.terminal = None;
+                    self.mode = Mode::Normal;
+                    self.message = String::from("Embedded terminal closed.");
+                    return;
+                }
+                if command.trim().is_empty() {
+                    return;
+                }
+                if terminal.run(&command).is_ok() && terminal.commands_run <= 3 {
+                    let _ = self.battle_pass.add_quest_progress("terminal", 1);
+                }
+            }
+            Key::Backspace => {
+                terminal.input.pop();
+            }
+            Key::Char(ch) if !ch.is_control() => terminal.input.push(ch),
+            _ => {}
+        }
     }
 
     fn open_file_manager(&mut self, path: Option<PathBuf>) -> io::Result<()> {
@@ -2231,10 +2674,10 @@ impl Editor {
         }
 
         match key {
-            'h' => self.move_left(),
-            'j' => self.move_down(),
-            'k' => self.move_up(),
-            'l' => self.move_right(),
+            'h' => self.repeat_motion(1, |editor| editor.move_left()),
+            'j' => self.repeat_motion(1, |editor| editor.move_down()),
+            'k' => self.repeat_motion(1, |editor| editor.move_up()),
+            'l' => self.repeat_motion(1, |editor| editor.move_right()),
             _ => unreachable!(),
         }
     }
@@ -2571,20 +3014,18 @@ fn terminal_size() -> (usize, usize) {
     (rows.unwrap_or(24), cols.unwrap_or(80))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn effective_render_dimensions(
-    pro_active: bool,
+    _pro_active: bool,
     configured_rows: Option<usize>,
     configured_cols: Option<usize>,
     terminal_rows: usize,
     terminal_cols: usize,
 ) -> (usize, usize) {
-    if !pro_active {
-        return (terminal_rows, terminal_cols);
-    }
-    (
-        configured_rows.unwrap_or(terminal_rows).min(terminal_rows),
-        configured_cols.unwrap_or(terminal_cols).min(terminal_cols),
-    )
+    // The viewport always fills the terminal; configured limits are kept only
+    // for config-file compatibility and no longer shrink the render area.
+    let _ = (configured_rows, configured_cols);
+    (terminal_rows, terminal_cols)
 }
 
 fn truncate_terminal_line(line: &str, max_chars: usize) -> String {
@@ -2872,14 +3313,14 @@ mod tests {
     }
 
     #[test]
-    fn pro_render_area_can_be_configured_but_free_uses_terminal() {
+    fn render_area_always_fills_the_terminal() {
         assert_eq!(
             effective_render_dimensions(false, Some(10), Some(20), 40, 120),
             (40, 120)
         );
         assert_eq!(
-            effective_render_dimensions(true, Some(100), Some(20), 40, 120),
-            (40, 20)
+            effective_render_dimensions(true, Some(10), Some(20), 40, 120),
+            (40, 120)
         );
     }
 
