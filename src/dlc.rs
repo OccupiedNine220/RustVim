@@ -8,8 +8,8 @@ pub struct DlcPack {
     pub id: String,
     pub name: String,
     pub description: String,
-    pub price_tokens: u64, // Price in Terminal Tokens
-    pub price_gems: u64,   // Price in Cyber Gems
+    pub price_tokens: u64,     // Price in Terminal Tokens
+    pub price_gems: u64,       // Price in Cyber Gems
     pub features: Vec<String>, // Features unlocked by this DLC
 }
 
@@ -94,10 +94,7 @@ pub fn available_dlc_packs() -> Vec<DlcPack> {
             description: "Позолоченный курсор с блестящим шлейфом. Ничего не ускоряет",
             price_tokens: 250,
             price_gems: 10,
-            features: vec![
-                "golden_cursor".to_string(),
-                "sparkle_trail".to_string(),
-            ],
+            features: vec!["golden_cursor".to_string(), "sparkle_trail".to_string()],
         },
         DlcPack {
             id: "pet_rock_pack".to_string(),
@@ -105,10 +102,15 @@ pub fn available_dlc_packs() -> Vec<DlcPack> {
             description: "Домашний камень-питомец для статус-бара. Просто сидит там",
             price_tokens: 100,
             price_gems: 5,
-            features: vec![
-                "pet_rock".to_string(),
-                "rock_idle_animation".to_string(),
-            ],
+            features: vec!["pet_rock".to_string(), "rock_idle_animation".to_string()],
+        },
+        DlcPack {
+            id: "lucky_slots_pack".to_string(),
+            name: "Lucky Slots Pack",
+            description: "Пак для любителей слотов: удачные барабаны и бонусный блеск",
+            price_tokens: 750,
+            price_gems: 30,
+            features: vec!["lucky_slots".to_string(), "golden_reels".to_string()],
         },
     ]
 }
