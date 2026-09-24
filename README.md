@@ -966,7 +966,7 @@ It already knows enough.
 
 RustVim uses the:
 
-**Vibe Public License 1.0**
+**Корпоративное лицензионное соглашение RustVim 2.0 (НЕ MIT)**
 
 See:
 
@@ -974,15 +974,27 @@ See:
 LICENSE.md
 ```
 
-The license reflects the project's AI-native development philosophy.
+Лицензия MIT к RustVim более не применяется. Vibe Public License 1.0
+к RustVim более не применяется. Действует только Соглашение 2.0.
+
+Перед первым запуском необходимо:
+
+```text
+1. Дочитать соглашение до 100% (листайте ↓ / Space / End).
+2. Нажать E и сдать экзамен: 30 вопросов за 10 минут.
+3. Набрать 24+/30 (80%). Повторы не ограничены.
+```
+
+Просто нажать Y недостаточно (п. 12.6). Необходимо прочитать, понять, сдать.
 
 In short:
 
 ```text
+Read it.
+Doze off.
+Scroll it.
+Pass it.
 Use it.
-Modify it.
-Push it.
-Vibe it.
 ```
 
 ---
@@ -1041,6 +1053,7 @@ Example:
 nix develop --command rustfmt --edition 2021 \
   src/main.rs \
   src/config.rs \
+  src/agreement.rs \
   src/license.rs \
   src/plugins.rs \
   src/telemetry.rs \

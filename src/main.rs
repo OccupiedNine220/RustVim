@@ -1,3 +1,4 @@
+mod agreement;
 mod ai;
 mod battle_pass;
 mod config;
@@ -35,23 +36,12 @@ const EYE_BREAK_INTERVAL_SECS: u64 = 300;
 fn eye_break_due(last: SystemTime, now: SystemTime) -> bool {
     now.duration_since(last).unwrap_or_default().as_secs() >= EYE_BREAK_INTERVAL_SECS
 }
-const LICENSE_TEXT: &[&str] = &[
-    "ЛИЦЕНЗИОННОЕ СОГЛАШЕНИЕ RUSTVIM",
-    "",
-    "RustVim предоставляется по лицензии MIT. Вы можете использовать, копировать,",
-    "изменять и распространять программу при сохранении текста лицензии и отказа",
-    "от гарантий из исходного проекта.",
-    "",
-    "Nitro, Pro, внутриигровая валюта Terminal Tokens, слоты, лутбоксы и Battle Pass",
-    "являются функциями приложения. Terminal Tokens не являются деньгами, не имеют",
-    "денежной стоимости, не продаются и не обмениваются на реальные товары или деньги.",
-    "Слоты и лутбоксы используют исключительно внутриигровую валюту и не принимают",
-    "платежи, банковские данные или иные реальные средства.",
-    "",
-    "Состояние лицензии, прогресс и внутриигровые данные хранятся локально на этом ПК.",
-    "AI-функции могут отправлять содержимое файла настроенному пользователем endpoint.",
-    "Вы принимаете ответственность за свои данные, конфигурацию и использование ПО.",
-];
+/// Текст соглашения ведётся в модуле `agreement`.
+///
+/// Лицензия MIT к RustVim более не применяется. Действует исключительно
+/// Корпоративное лицензионное соглашение RustVim 2.0 с обязательной
+/// аттестацией из 30 вопросов с ограничением времени 10 минут.
+const LICENSE_TEXT: &[&str] = agreement::AGREEMENT_TEXT;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -254,6 +244,10 @@ struct Editor {
     access: Access,
     plugins: PluginManager,
     agreement_required: bool,
+    agreement_scroll: usize,
+    agreement_exam: Option<agreement::ExamSession>,
+    agreement_exam_cursor: usize,
+    agreement_exam_message: String,
     battle_pass: BattlePass,
     economy: Economy,
     terminal: Option<TerminalPane>,
@@ -325,7 +319,11 @@ impl Editor {
                 (true, false, true, Theme::White, false)
             };
 
-        let agreement_required = !access.agreement_accepted;
+        // Соглашение 2.0 требует обязательной аттестации: старая отметка
+        // без версии 2.0 и сданного экзамена больше не считается принятием.
+        let agreement_required = !access.agreement_accepted
+            || license_state.agreement_version != agreement::AGREEMENT_VERSION
+            || !license_state.exam_passed;
         let mut editor = Self {
             path,
             lines,
@@ -361,6 +359,10 @@ impl Editor {
             ad_message: None,
             license_state,
             agreement_required,
+            agreement_scroll: 0,
+            agreement_exam: None,
+            agreement_exam_cursor: 0,
+            agreement_exam_message: String::new(),
             access: access.clone(),
             plugins: PluginManager::new(),
             battle_pass: BattlePass::load()?,
@@ -376,7 +378,7 @@ impl Editor {
         if editor.agreement_required {
             editor.mode = Mode::Agreement;
             editor.message = String::from(
-                "Перед первым запуском примите соглашение: Y/Enter — принять, N — выйти.",
+                "Перед первым запуском прочитайте соглашение 2.0 (НЕ MIT) и сдайте экзамен 30 вопросов за 10 минут.",
             );
         }
         Ok(editor)
@@ -513,17 +515,129 @@ impl Editor {
         io::stdout().flush()
     }
 
+    fn agreement_visible_rows(&self, rows: usize) -> usize {
+        rows.saturating_sub(5).max(1)
+    }
+
+    fn agreement_max_scroll(&self, rows: usize) -> usize {
+        LICENSE_TEXT
+            .len()
+            .saturating_sub(self.agreement_visible_rows(rows))
+    }
+
+    fn agreement_at_bottom(&self, rows: usize) -> bool {
+        self.agreement_scroll >= self.agreement_max_scroll(rows)
+    }
+
     fn render_agreement(&self, rows: usize, cols: usize) -> io::Result<()> {
+        if let Some(exam) = &self.agreement_exam {
+            return self.render_agreement_exam(exam, rows, cols);
+        }
+        let visible = self.agreement_visible_rows(rows);
+        let max_scroll = self.agreement_max_scroll(rows);
+        let pct = self
+            .agreement_scroll
+            .saturating_mul(100)
+            .checked_div(max_scroll)
+            .unwrap_or(100);
         println!(
-            "{}{}{}",
+            "{}{} (НЕ MIT, v{}) — прочитано {}%{}{}",
             self.theme.status(),
-            LICENSE_TEXT[0],
+            agreement::AGREEMENT_TITLE,
+            agreement::AGREEMENT_VERSION,
+            pct,
+            if self.agreement_at_bottom(rows) {
+                " — КОНЕЦ, можно сдавать (E)"
+            } else {
+                ""
+            },
             self.theme.screen()
         );
-        for line in LICENSE_TEXT.iter().skip(1).take(rows.saturating_sub(4)) {
+        for line in LICENSE_TEXT
+            .iter()
+            .skip(self.agreement_scroll)
+            .take(visible)
+        {
             println!("{}", truncate_terminal_line(line, cols));
         }
-        print!("Y/Enter — принять; N/Esc — выйти");
+        if self.agreement_exam_message.is_empty() {
+            print!(
+                "↑/↓ j/k PgUp/PgDn Home/End — читать; E — экзамен 30 вопр./10 мин; N/Esc — выйти"
+            );
+        } else {
+            print!(
+                "{}",
+                truncate_terminal_line(&self.agreement_exam_message, cols)
+            );
+        }
+        io::stdout().flush()
+    }
+
+    fn render_agreement_exam(
+        &self,
+        exam: &agreement::ExamSession,
+        rows: usize,
+        cols: usize,
+    ) -> io::Result<()> {
+        let now = SystemTime::now();
+        let remaining = exam.remaining(now);
+        let score_so_far = exam.score();
+        let idx = exam.current.min(agreement::EXAM_QUESTION_COUNT - 1);
+        let q = &agreement::EXAM_QUESTIONS[idx];
+        println!(
+            "{}ЭКЗАМЕН v{}: вопрос {}/{} | осталось {} | верно сейчас: {} | нужно: {}{}",
+            self.theme.status(),
+            agreement::AGREEMENT_VERSION,
+            idx + 1,
+            agreement::EXAM_QUESTION_COUNT,
+            agreement::format_remaining(remaining),
+            score_so_far,
+            agreement::EXAM_PASS_SCORE,
+            self.theme.screen()
+        );
+        println!(
+            "{}",
+            truncate_terminal_line(q.question, cols.saturating_sub(1))
+        );
+        for (i, option) in q.options.iter().enumerate() {
+            let chosen = exam.answers[idx] == Some(i);
+            let cursor = self.agreement_exam_cursor == i;
+            let marker = match (cursor, chosen) {
+                (true, true) => "> [*]",
+                (true, false) => "> [ ]",
+                (false, true) => "  [*]",
+                (false, false) => "  [ ]",
+            };
+            println!(
+                "{} {}. {}",
+                marker,
+                i + 1,
+                truncate_terminal_line(option, cols.saturating_sub(10))
+            );
+        }
+        let answered = exam.answered_count();
+        println!(
+            "Отвечено: {}/{} | j/k/↑/↓ — выбор, 1-4/Enter — ответить, h/l — вопрос, S — сдать",
+            answered,
+            agreement::EXAM_QUESTION_COUNT
+        );
+        // Прогресс-строка по отвеченным вопросам.
+        let bar_width = cols.saturating_sub(4).clamp(10, 60);
+        let filled = answered * bar_width / agreement::EXAM_QUESTION_COUNT;
+        println!(
+            "[{}{}]",
+            "#".repeat(filled),
+            ".".repeat(bar_width.saturating_sub(filled))
+        );
+        let _ = rows;
+        if self.agreement_exam_message.is_empty() {
+            print!("R — заново (новый таймер); Esc — назад к тексту; N — выйти");
+        } else {
+            print!(
+                "{}",
+                truncate_terminal_line(&self.agreement_exam_message, cols)
+            );
+        }
         io::stdout().flush()
     }
 
@@ -583,14 +697,195 @@ impl Editor {
         }
     }
 
+    fn start_agreement_exam(&mut self) {
+        self.agreement_exam = Some(agreement::ExamSession::new(SystemTime::now()));
+        self.agreement_exam_cursor = 0;
+        self.agreement_exam_message =
+            String::from("Экзамен начат: 30 вопросов, 10 минут. Отвечайте 1-4, сдача — S.");
+        telemetry::record("exam_started").ok();
+    }
+
+    fn finish_agreement_exam(&mut self) -> io::Result<()> {
+        let Some(exam) = self.agreement_exam.clone() else {
+            return Ok(());
+        };
+        let score = exam.score();
+        if exam.passed() {
+            license::record_exam_pass(
+                &mut self.license_state,
+                score as u8,
+                agreement::AGREEMENT_VERSION,
+                SystemTime::now(),
+            )?;
+            self.access = license::access(
+                &self.license_state,
+                nitro_active_from_env(),
+                pro_active_from_env(),
+                SystemTime::now(),
+            );
+            self.agreement_required = false;
+            self.agreement_exam = None;
+            self.mode = Mode::Welcome;
+            self.message = format!(
+                "Экзамен сдан: {}/30. Соглашение 2.0 принято. Enter или i — открыть буфер.",
+                score
+            );
+            telemetry::record("exam_passed").ok();
+        } else {
+            self.agreement_exam_message = format!(
+                "Не сдано: {}/30 (нужно 24). R — retry, Esc — к тексту, N — выйти.",
+                score
+            );
+            telemetry::record("exam_failed").ok();
+        }
+        Ok(())
+    }
+
     fn handle_agreement(&mut self, key: Key) -> io::Result<bool> {
+        // Если экзамен активен — обрабатываем клавиши экзамена.
+        if self.agreement_exam.is_some() {
+            // Проверка таймера: время вышло — автозавершение.
+            let expired = self
+                .agreement_exam
+                .as_ref()
+                .map(|e| e.expired(SystemTime::now()))
+                .unwrap_or(false);
+            if expired {
+                self.agreement_exam_message =
+                    String::from("Время вышло (10:00). Завершаем с текущим результатом.");
+                self.finish_agreement_exam()?;
+                return Ok(false);
+            }
+            match key {
+                Key::ArrowUp => {
+                    self.agreement_exam_cursor = self.agreement_exam_cursor.saturating_sub(1);
+                }
+                Key::ArrowDown => {
+                    self.agreement_exam_cursor = (self.agreement_exam_cursor + 1).min(3);
+                }
+                Key::Char('k') => {
+                    self.agreement_exam_cursor = self.agreement_exam_cursor.saturating_sub(1);
+                }
+                Key::Char('j') => {
+                    self.agreement_exam_cursor = (self.agreement_exam_cursor + 1).min(3);
+                }
+                Key::Char('h') | Key::ArrowLeft => {
+                    if let Some(exam) = &mut self.agreement_exam {
+                        exam.current = exam.current.saturating_sub(1);
+                        self.agreement_exam_cursor = exam.answers[exam.current].unwrap_or(0);
+                    }
+                }
+                Key::Char('l') | Key::ArrowRight => {
+                    if let Some(exam) = &mut self.agreement_exam {
+                        exam.current = (exam.current + 1).min(agreement::EXAM_QUESTION_COUNT - 1);
+                        self.agreement_exam_cursor = exam.answers[exam.current].unwrap_or(0);
+                    }
+                }
+                Key::Char(ch @ ('1' | '2' | '3' | '4')) => {
+                    let opt = (ch as u8 - b'1') as usize;
+                    if let Some(exam) = &mut self.agreement_exam {
+                        let cur = exam.current;
+                        exam.answer(cur, opt);
+                        self.agreement_exam_cursor = opt;
+                        if cur + 1 < agreement::EXAM_QUESTION_COUNT {
+                            exam.current = cur + 1;
+                            self.agreement_exam_cursor = exam.answers[exam.current].unwrap_or(0);
+                        }
+                    }
+                }
+                Key::Enter => {
+                    if let Some(exam) = &mut self.agreement_exam {
+                        let cur = exam.current;
+                        exam.answer(cur, self.agreement_exam_cursor);
+                        if cur + 1 < agreement::EXAM_QUESTION_COUNT {
+                            exam.current = cur + 1;
+                            self.agreement_exam_cursor = exam.answers[exam.current].unwrap_or(0);
+                        }
+                    }
+                }
+                Key::Char('p') | Key::Char('P') => {
+                    if let Some(exam) = &mut self.agreement_exam {
+                        exam.current = exam.current.saturating_sub(1);
+                        self.agreement_exam_cursor = exam.answers[exam.current].unwrap_or(0);
+                    }
+                }
+                Key::Char('s') | Key::Char('S') => {
+                    self.finish_agreement_exam()?;
+                }
+                Key::Char('r') | Key::Char('R') => {
+                    self.start_agreement_exam();
+                }
+                Key::Esc => {
+                    self.agreement_exam = None;
+                    self.agreement_exam_message = String::from(
+                        "Возврат к тексту. Дочитайте до конца и нажмите E для экзамена.",
+                    );
+                }
+                Key::Char('N') | Key::CtrlC => return Ok(true),
+                Key::Char('q') => return Ok(true),
+                _ => {}
+            }
+            // После каждого ответа проверяем таймер повторно.
+            let expired_after = self
+                .agreement_exam
+                .as_ref()
+                .map(|e| e.expired(SystemTime::now()))
+                .unwrap_or(false);
+            if expired_after {
+                self.finish_agreement_exam()?;
+            }
+            return Ok(false);
+        }
+
+        // Режим чтения соглашения.
+        let (rows, _) = terminal_size();
+        let max_scroll = self.agreement_max_scroll(rows);
+        let page = self.agreement_visible_rows(rows).saturating_sub(1).max(1);
         match key {
-            Key::Char('y') | Key::Char('Y') | Key::Enter => {
-                license::accept_agreement(&mut self.license_state)?;
-                self.agreement_required = false;
-                self.mode = Mode::Welcome;
-                self.message = String::from("Соглашение принято. Enter или i — открыть буфер.");
-                telemetry::record("agreement_accepted").ok();
+            Key::ArrowDown | Key::Char('j') => {
+                self.agreement_scroll = (self.agreement_scroll + 1).min(max_scroll);
+            }
+            Key::ArrowUp | Key::Char('k') => {
+                self.agreement_scroll = self.agreement_scroll.saturating_sub(1);
+            }
+            Key::Char(' ') => {
+                self.agreement_scroll = (self.agreement_scroll + page).min(max_scroll);
+            }
+            Key::Char('b') | Key::Char('B') => {
+                self.agreement_scroll = self.agreement_scroll.saturating_sub(page);
+            }
+            Key::ArrowRight | Key::ArrowLeft => {}
+            Key::Enter => {
+                if self.agreement_at_bottom(rows) {
+                    self.start_agreement_exam();
+                } else {
+                    self.agreement_exam_message =
+                        String::from("Дочитайте соглашение до конца (100%), затем нажмите E.");
+                }
+            }
+            Key::Char('e') | Key::Char('E') => {
+                if self.agreement_at_bottom(rows) {
+                    self.start_agreement_exam();
+                } else {
+                    self.agreement_exam_message = format!(
+                        "Сначала дочитайте до конца: сейчас {}%, нужно 100%. Листайте ↓/Space.",
+                        self.agreement_scroll
+                            .saturating_mul(100)
+                            .checked_div(max_scroll)
+                            .unwrap_or(100)
+                    );
+                }
+            }
+            Key::Char('g') => {
+                self.agreement_scroll = 0;
+            }
+            Key::Char('G') => {
+                self.agreement_scroll = max_scroll;
+            }
+            Key::Char('y') | Key::Char('Y') => {
+                self.agreement_exam_message = String::from(
+                    "Просто нажать Y недостаточно (п. 12.6). Дочитайте и сдайте экзамен 30/10мин.",
+                );
             }
             Key::Char('n') | Key::Char('N') | Key::Char('q') | Key::Esc | Key::CtrlC => {
                 return Ok(true)

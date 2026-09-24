@@ -3,7 +3,7 @@ name = "rustvim"
 version = "0.1.4"
 edition = "2021"
 description = "A small from-scratch modal terminal editor prototype"
-license = "VPL-1.0"
+license = "SEE LICENSE IN LICENSE.md"
 
 [dependencies]
 async-openai = { version = "0.41.3", features = ["responses"] }

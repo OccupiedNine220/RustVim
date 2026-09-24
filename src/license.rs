@@ -15,6 +15,10 @@ const PRO_TRIAL: Duration = Duration::from_secs(30 * 60);
 #[serde(default)]
 pub struct LicenseState {
     pub agreement_accepted: bool,
+    pub agreement_version: String,
+    pub exam_passed: bool,
+    pub exam_score: u8,
+    pub exam_passed_at: Option<u64>,
     pub trial_started_at: Option<u64>,
     pub trial_consumed_secs: u64,
     pub plugins_trial_started_at: Option<u64>,
@@ -110,8 +114,44 @@ pub fn start_plugins_trial(state: &mut LicenseState, now: SystemTime) -> io::Res
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn accept_agreement(state: &mut LicenseState) -> io::Result<()> {
     state.agreement_accepted = true;
+    save(state)
+}
+
+/// Чистое применение успешной аттестации без записи на диск.
+pub fn apply_exam_pass(
+    state: &mut LicenseState,
+    score: u8,
+    version: &str,
+    now: SystemTime,
+) -> io::Result<()> {
+    if score < 24 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "exam score below passing threshold",
+        ));
+    }
+    state.exam_passed = true;
+    state.exam_score = score;
+    state.exam_passed_at = Some(epoch(now));
+    state.agreement_version = version.to_owned();
+    state.agreement_accepted = true;
+    Ok(())
+}
+
+/// Фиксирует успешную аттестацию по соглашению версии 2.0.
+///
+/// Принимается только проходной балл (>= 24/30). Возвращает ошибку,
+/// если балл ниже проходного, чтобы исключить случайное принятие.
+pub fn record_exam_pass(
+    state: &mut LicenseState,
+    score: u8,
+    version: &str,
+    now: SystemTime,
+) -> io::Result<()> {
+    apply_exam_pass(state, score, version, now)?;
     save(state)
 }
 
@@ -124,6 +164,10 @@ fn integrity(state: &LicenseState) -> String {
     env::var("USER").unwrap_or_default().hash(&mut hasher);
     env::var("HOSTNAME").unwrap_or_default().hash(&mut hasher);
     state.agreement_accepted.hash(&mut hasher);
+    state.agreement_version.hash(&mut hasher);
+    state.exam_passed.hash(&mut hasher);
+    state.exam_score.hash(&mut hasher);
+    state.exam_passed_at.hash(&mut hasher);
     state.trial_started_at.hash(&mut hasher);
     state.trial_consumed_secs.hash(&mut hasher);
     state.plugins_trial_started_at.hash(&mut hasher);
@@ -132,7 +176,7 @@ fn integrity(state: &LicenseState) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{access, LicenseState};
+    use super::{access, apply_exam_pass, LicenseState};
     use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
@@ -154,5 +198,22 @@ mod tests {
         let access = access(&state, true, false, UNIX_EPOCH + Duration::from_secs(1901));
         assert!(access.nitro);
         assert!(!access.pro);
+    }
+
+    #[test]
+    fn exam_pass_records_agreement_version() {
+        let mut state = LicenseState::default();
+        assert!(apply_exam_pass(&mut state, 24, "2.0", UNIX_EPOCH).is_ok());
+        assert!(state.agreement_accepted);
+        assert!(state.exam_passed);
+        assert_eq!(state.exam_score, 24);
+        assert_eq!(state.agreement_version, "2.0");
+    }
+
+    #[test]
+    fn exam_fail_does_not_accept_agreement() {
+        let mut state = LicenseState::default();
+        assert!(apply_exam_pass(&mut state, 23, "2.0", UNIX_EPOCH).is_err());
+        assert!(!state.agreement_accepted);
     }
 }
