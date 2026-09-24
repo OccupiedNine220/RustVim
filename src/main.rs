@@ -1,6 +1,7 @@
 mod ai;
 mod battle_pass;
 mod config;
+mod dlc;
 mod economy;
 mod license;
 mod plugins;
