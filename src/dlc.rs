@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::{collections::HashSet, env, fs, io, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -65,8 +67,8 @@ pub fn available_dlc_packs() -> Vec<DlcPack> {
     vec![
         DlcPack {
             id: "retro_theme_pack".to_string(),
-            name: "Retro Theme Pack",
-            description: "Пакет ретро тем для терминала и редактора",
+            name: "Retro Theme Pack".to_string(),
+            description: "Пакет ретро тем для терминала и редактора".to_string(),
             price_tokens: 500,
             price_gems: 25,
             features: vec![
@@ -78,8 +80,8 @@ pub fn available_dlc_packs() -> Vec<DlcPack> {
         },
         DlcPack {
             id: "battle_pass_season_2".to_string(),
-            name: "Battle Pass Season 2",
-            description: "Второй сезон Battle Pass с новыми наградами и квестами",
+            name: "Battle Pass Season 2".to_string(),
+            description: "Второй сезон Battle Pass с новыми наградами и квестами".to_string(),
             price_tokens: 1000,
             price_gems: 50,
             features: vec![
@@ -90,64 +92,65 @@ pub fn available_dlc_packs() -> Vec<DlcPack> {
         },
         DlcPack {
             id: "golden_cursor_pack".to_string(),
-            name: "Golden Cursor Pack",
-            description: "Позолоченный курсор с блестящим шлейфом. Ничего не ускоряет",
+            name: "Golden Cursor Pack".to_string(),
+            description: "Позолоченный курсор с блестящим шлейфом. Ничего не ускоряет".to_string(),
             price_tokens: 250,
             price_gems: 10,
             features: vec!["golden_cursor".to_string(), "sparkle_trail".to_string()],
         },
         DlcPack {
             id: "pet_rock_pack".to_string(),
-            name: "Pet Rock Pack",
-            description: "Домашний камень-питомец для статус-бара. Просто сидит там",
+            name: "Pet Rock Pack".to_string(),
+            description: "Домашний камень-питомец для статус-бара. Просто сидит там".to_string(),
             price_tokens: 100,
             price_gems: 5,
             features: vec!["pet_rock".to_string(), "rock_idle_animation".to_string()],
         },
         DlcPack {
             id: "lucky_slots_pack".to_string(),
-            name: "Lucky Slots Pack",
-            description: "Пак для любителей слотов: удачные барабаны и бонусный блеск",
+            name: "Lucky Slots Pack".to_string(),
+            description: "Пак для любителей слотов: удачные барабаны и бонусный блеск".to_string(),
             price_tokens: 750,
             price_gems: 30,
             features: vec!["lucky_slots".to_string(), "golden_reels".to_string()],
         },
         DlcPack {
             id: "rubber_duck_pack".to_string(),
-            name: "Rubber Duck Pack",
-            description: "Резиновая уточка для дебага. Просто смотрит на код",
+            name: "Rubber Duck Pack".to_string(),
+            description: "Резиновая уточка для дебага. Просто смотрит на код".to_string(),
             price_tokens: 300,
             price_gems: 15,
             features: vec!["rubber_duck".to_string(), "duck_stare".to_string()],
         },
         DlcPack {
             id: "invisible_ink_pack".to_string(),
-            name: "Invisible Ink Pack",
-            description: "Невидимые чернила для секретных комментариев. Невидимы даже вам",
+            name: "Invisible Ink Pack".to_string(),
+            description: "Невидимые чернила для секретных комментариев. Невидимы даже вам"
+                .to_string(),
             price_tokens: 200,
             price_gems: 8,
             features: vec!["invisible_ink".to_string(), "secret_comments".to_string()],
         },
         DlcPack {
             id: "second_cursor_pack".to_string(),
-            name: "Second Cursor Pack",
-            description: "Второй курсор, который повторяет первый с задержкой",
+            name: "Second Cursor Pack".to_string(),
+            description: "Второй курсор, который повторяет первый с задержкой".to_string(),
             price_tokens: 400,
             price_gems: 20,
             features: vec!["second_cursor".to_string(), "cursor_echo".to_string()],
         },
         DlcPack {
             id: "floppy_sound_pack".to_string(),
-            name: "Floppy Sound Pack",
-            description: "Звук дискеты при каждом сохранении. Только звук",
+            name: "Floppy Sound Pack".to_string(),
+            description: "Звук дискеты при каждом сохранении. Только звук".to_string(),
             price_tokens: 150,
             price_gems: 5,
             features: vec!["floppy_sound".to_string(), "save_click".to_string()],
         },
         DlcPack {
             id: "motivational_quotes_pack".to_string(),
-            name: "Motivational Quotes Pack",
-            description: "Мотивационные цитаты в статус-баре. Не мотивируют",
+            name: "Motivational Quotes Pack".to_string(),
+            description: "Мотивационные цитаты в статус-баре. Не мотивируют".to_string(),
             price_tokens: 350,
             price_gems: 12,
             features: vec!["daily_quotes".to_string(), "stale_motivation".to_string()],
