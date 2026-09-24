@@ -30,8 +30,9 @@ use terminal_graphics::{is_image_path, render_image};
 const PRO_ENV_VAR: &str = "RUSTVIM_PRO";
 const NITRO_ENV_VAR: &str = "RUSTVIM_NITRO";
 const SUBSCRIPTION_PROMPT: &str = "Оформите подписку RustVim Pro для AI и премиум-функций.";
-/// Eye-break reminders appear this often; only Pro users may disable them.
-const EYE_BREAK_INTERVAL_SECS: u64 = 300;
+/// Eye-break reminders appear this often; disabling them is forbidden
+/// for everyone, including Pro users — healthy eyes buy more DLC.
+const EYE_BREAK_INTERVAL_SECS: u64 = 120;
 
 fn eye_break_due(last: SystemTime, now: SystemTime) -> bool {
     now.duration_since(last).unwrap_or_default().as_secs() >= EYE_BREAK_INTERVAL_SECS
@@ -1293,8 +1294,7 @@ impl Editor {
             "ad" | "watch ad" => self.watch_ad(),
             "eyebreak" => self.show_eye_break_status(),
             "eyebreak on" => self.set_eye_break(true),
-            "eyebreak off" if self.pro_active => self.set_eye_break(false),
-            "eyebreak off" => self.show_subscription_prompt(),
+            "eyebreak off" => self.refuse_eye_break_disable(),
             "eyebreak done" => self.snooze_eye_break(),
             "achievements" | "ach" => self.list_achievements(),
             "leaderboard" | "lb" => self.message = self.fake_leaderboard(),
@@ -1583,35 +1583,32 @@ impl Editor {
         } else {
             "выключена"
         };
-        self.message = if self.pro_active {
-            format!(
-                "Разминка для глаз {state} (каждые 5 минут). Команды: :eyebreak on | :eyebreak off | :eyebreak done."
-            )
-        } else {
-            format!(
-                "Разминка для глаз {state} (каждые 5 минут). Отключение доступно только в RustVim Pro."
-            )
-        };
+        self.message = format!(
+            "Разминка для глаз {state} (каждые 2 минуты). Отключение запрещено для всех, включая RustVim Pro. Команды: :eyebreak on | :eyebreak done."
+        );
     }
 
     fn set_eye_break(&mut self, enabled: bool) {
-        self.eye_break_enabled = enabled;
-        if enabled {
-            self.last_eye_break = SystemTime::now();
+        if !enabled {
+            self.refuse_eye_break_disable();
+            return;
         }
-        self.message = if enabled {
-            String::from("Разминка для глаз включена: напоминание каждые 5 минут.")
-        } else {
-            String::from(
-                "Разминка для глаз отключена (привилегия RustVim Pro). Берегите зрение сами.",
-            )
-        };
+        self.eye_break_enabled = true;
+        self.last_eye_break = SystemTime::now();
+        self.message = String::from("Разминка для глаз включена: напоминание каждые 2 минуты.");
+    }
+
+    fn refuse_eye_break_disable(&mut self) {
+        self.eye_break_enabled = true;
+        self.message = String::from(
+            "Отключение разминки запрещено для всех, включая RustVim Pro: здоровые глаза лучше видят каталог DLC.",
+        );
     }
 
     fn snooze_eye_break(&mut self) {
         self.last_eye_break = SystemTime::now();
         self.message = String::from(
-            "Разминка засчитана. Следующее напоминание через 5 минут — посмотрите вдаль!",
+            "Разминка засчитана. Следующее напоминание через 2 минуты — посмотрите вдаль!",
         );
     }
 
@@ -3794,10 +3791,10 @@ mod tests {
     }
 
     #[test]
-    fn eye_break_fires_every_five_minutes() {
+    fn eye_break_fires_every_two_minutes() {
         let start = UNIX_EPOCH;
-        assert!(!eye_break_due(start, start + Duration::from_secs(299)));
-        assert!(eye_break_due(start, start + Duration::from_secs(300)));
+        assert!(!eye_break_due(start, start + Duration::from_secs(119)));
+        assert!(eye_break_due(start, start + Duration::from_secs(120)));
         assert!(eye_break_due(start, start + Duration::from_secs(3600)));
     }
 
