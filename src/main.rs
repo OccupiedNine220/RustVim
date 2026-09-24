@@ -29,6 +29,12 @@ use terminal_graphics::{is_image_path, render_image};
 const PRO_ENV_VAR: &str = "RUSTVIM_PRO";
 const NITRO_ENV_VAR: &str = "RUSTVIM_NITRO";
 const SUBSCRIPTION_PROMPT: &str = "Оформите подписку RustVim Pro для AI и премиум-функций.";
+/// Eye-break reminders appear this often; only Pro users may disable them.
+const EYE_BREAK_INTERVAL_SECS: u64 = 300;
+
+fn eye_break_due(last: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(last).unwrap_or_default().as_secs() >= EYE_BREAK_INTERVAL_SECS
+}
 const LICENSE_TEXT: &[&str] = &[
     "ЛИЦЕНЗИОННОЕ СОГЛАШЕНИЕ RUSTVIM",
     "",
@@ -255,6 +261,8 @@ struct Editor {
     marks: std::collections::BTreeMap<char, usize>,
     relativenumber: bool,
     last_viewport_rows: Option<usize>,
+    eye_break_enabled: bool,
+    last_eye_break: SystemTime,
 }
 
 impl Editor {
@@ -362,6 +370,8 @@ impl Editor {
             marks: std::collections::BTreeMap::new(),
             relativenumber: false,
             last_viewport_rows: None,
+            eye_break_enabled: true,
+            last_eye_break: now,
         };
         if editor.agreement_required {
             editor.mode = Mode::Agreement;
@@ -536,6 +546,13 @@ impl Editor {
                 "RustVim Pro: redo, плагины, темы и окна — попробуйте Pro",
             ));
             telemetry::record("pro_ad_shown").ok();
+        }
+        if self.eye_break_enabled && eye_break_due(self.last_eye_break, SystemTime::now()) {
+            self.last_eye_break = SystemTime::now();
+            self.message = String::from(
+                "Разминка для глаз: отведите взгляд от экрана на 20 секунд и поморгайте. :eyebreak done — дальше.",
+            );
+            telemetry::record("eye_break_shown").ok();
         }
         match self.mode {
             Mode::Agreement => self.handle_agreement(key),
@@ -979,6 +996,11 @@ impl Editor {
             "inventory" | "inv" => self.message = self.economy.inventory_report(),
             "daily" | "daily reward" => self.claim_daily_reward(),
             "ad" | "watch ad" => self.watch_ad(),
+            "eyebreak" => self.show_eye_break_status(),
+            "eyebreak on" => self.set_eye_break(true),
+            "eyebreak off" if self.pro_active => self.set_eye_break(false),
+            "eyebreak off" => self.show_subscription_prompt(),
+            "eyebreak done" => self.snooze_eye_break(),
             "achievements" | "ach" => self.list_achievements(),
             "leaderboard" | "lb" => self.message = self.fake_leaderboard(),
             "title" => {
@@ -1017,7 +1039,7 @@ impl Editor {
             }
             "help" => {
                 self.message = String::from(
-                    "i/a/I/A/o/O | 5j/3w/12G counts | zz/zb | * ^ | V y d | :sort Pro | m/` marks Pro | :term Pro | :daily :ad :lootbox [rare] :inventory :title :achievements :leaderboard :bp :bp claim [premium]",
+                    "i/a/I/A/o/O | 5j/3w/12G counts | zz/zb | * ^ | V y d | :sort Pro | m/` marks Pro | :term Pro | :daily :ad :lootbox [rare] :inventory :title :achievements :leaderboard :bp :bp claim [premium] :eyebreak",
                 );
             }
             "set syntax" if self.pro_active => {
@@ -1258,6 +1280,44 @@ impl Editor {
             Ok(text) => text,
             Err(error) => format!("Ad error: {error}"),
         };
+    }
+
+    fn show_eye_break_status(&mut self) {
+        let state = if self.eye_break_enabled {
+            "включена"
+        } else {
+            "выключена"
+        };
+        self.message = if self.pro_active {
+            format!(
+                "Разминка для глаз {state} (каждые 5 минут). Команды: :eyebreak on | :eyebreak off | :eyebreak done."
+            )
+        } else {
+            format!(
+                "Разминка для глаз {state} (каждые 5 минут). Отключение доступно только в RustVim Pro."
+            )
+        };
+    }
+
+    fn set_eye_break(&mut self, enabled: bool) {
+        self.eye_break_enabled = enabled;
+        if enabled {
+            self.last_eye_break = SystemTime::now();
+        }
+        self.message = if enabled {
+            String::from("Разминка для глаз включена: напоминание каждые 5 минут.")
+        } else {
+            String::from(
+                "Разминка для глаз отключена (привилегия RustVim Pro). Берегите зрение сами.",
+            )
+        };
+    }
+
+    fn snooze_eye_break(&mut self) {
+        self.last_eye_break = SystemTime::now();
+        self.message = String::from(
+            "Разминка засчитана. Следующее напоминание через 5 минут — посмотрите вдаль!",
+        );
     }
 
     fn list_achievements(&mut self) {
@@ -3290,11 +3350,13 @@ fn main() -> io::Result<()> {
 mod tests {
     use super::{
         autocorrect_text, ceil_char_boundary, effective_render_dimensions, env_value_is_enabled,
-        floor_char_boundary, highlight_syntax, parse_command_words, render_cursor_line_window,
-        render_markdown, serialize_editor_lines, split_editor_lines, strip_code_fence,
-        syntax_for_path, truncate_terminal_line, visible_width, PathBuf, Syntax, Theme,
+        eye_break_due, floor_char_boundary, highlight_syntax, parse_command_words,
+        render_cursor_line_window, render_markdown, serialize_editor_lines, split_editor_lines,
+        strip_code_fence, syntax_for_path, truncate_terminal_line, visible_width, PathBuf, Syntax,
+        Theme,
     };
     use std::collections::BTreeMap;
+    use std::time::{Duration, UNIX_EPOCH};
 
     #[test]
     fn pro_env_accepts_common_enabled_values() {
@@ -3434,6 +3496,20 @@ mod tests {
         assert_eq!(rendered[0], "TITLE");
         assert_eq!(rendered[2], "  • item");
         assert_eq!(rendered[3], "  │ quote");
+    }
+
+    #[test]
+    fn eye_break_fires_every_five_minutes() {
+        let start = UNIX_EPOCH;
+        assert!(!eye_break_due(start, start + Duration::from_secs(299)));
+        assert!(eye_break_due(start, start + Duration::from_secs(300)));
+        assert!(eye_break_due(start, start + Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn eye_break_tolerates_clock_skew() {
+        let now = UNIX_EPOCH;
+        assert!(!eye_break_due(now + Duration::from_secs(10), now));
     }
 
     #[test]
